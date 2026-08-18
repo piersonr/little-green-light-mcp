@@ -11,7 +11,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { request, getList, getCachedLookup, LglError } from "./lgl.js";
+import { request, getList, getAllList, getCachedLookup, LglError } from "./lgl.js";
 import { shapeConstituent, shapeGift, shapeLookup, summarizeGiving, truncationNote } from "./shape.js";
 
 const server = new McpServer({
@@ -108,8 +108,9 @@ server.registerTool(
     title: "search_constituents",
     description:
       "Search LGL constituents by name or email address. Returns a compact " +
-      "summary per match (name, email, phone, city/state, giving dates and " +
-      "lifetime total) — pass verbose:true for the full record.",
+      "summary per match (name, email, phone, city/state). Giving totals are " +
+      "not included — use get_constituent for those. Pass verbose:true for " +
+      "the full record.",
     inputSchema: {
       query: z
         .string()
@@ -134,7 +135,7 @@ server.registerTool(
   "get_constituent",
   {
     title: "get_constituent",
-    description: "Fetch one constituent's full profile by LGL id.",
+    description: "Fetch one constituent's profile by LGL id, including giving totals computed from the full gift history.",
     inputSchema: {
       id: z.union([z.string(), z.number()]).describe("LGL constituent id."),
       verbose: verboseParam,
@@ -145,10 +146,9 @@ server.registerTool(
     if (verbose) return textResult(shapeConstituent(raw, { verbose }));
 
     // LGL doesn't return giving totals on the constituent object itself —
-    // compute them from that constituent's own gift history. Capped at 250
-    // (a large page for one person's giving history) so one question can't
-    // fan out into unbounded pagination; shapeConstituent reports if capped.
-    const giftsPage = await getList(`/constituents/${id}/gifts`, { limit: 250, offset: 0 });
+    // compute them from that constituent's own gift history, paged to
+    // completion (getAllList has a high safety cap and reports truncated).
+    const giftsPage = await getAllList(`/constituents/${id}/gifts`);
     const giving = summarizeGiving(giftsPage.items, {
       totalCount: giftsPage.total,
       sampledCount: giftsPage.items.length,
