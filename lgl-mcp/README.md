@@ -29,7 +29,7 @@ not here.
    ```
 4. Register with Claude Code:
    ```bash
-   claude mcp add lgl -- node /Users/robpierson/Documents/projects/mcf-funding/lgl-mcp/index.js
+   claude mcp add lgl -- node /path/to/lgl-mcp/index.js
    ```
 
 ## Tools
