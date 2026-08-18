@@ -1,8 +1,10 @@
-# lgl-mcp
+# little-green-light-mcp
 
 A read-only [MCP](https://modelcontextprotocol.io) server for the Little Green Light donor CRM.
 Lets Claude answer questions like "who lapsed this year?", "did the Smith gift land?", or
 "what's year-to-date against last year?" by querying LGL directly.
+
+Registers with Claude Code under the short name `lgl` (see Setup below).
 
 ## Read-only by construction
 
@@ -29,7 +31,7 @@ not here.
    ```
 4. Register with Claude Code:
    ```bash
-   claude mcp add lgl -- node /path/to/lgl-mcp/index.js
+   claude mcp add lgl -- node /path/to/little-green-light-mcp/index.js
    ```
 
 ## Tools
