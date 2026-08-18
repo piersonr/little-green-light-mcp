@@ -1,10 +1,10 @@
 # little-green-light-mcp
 
 A read-only [MCP](https://modelcontextprotocol.io) server for the Little Green Light donor CRM.
-Lets Claude answer questions like "who lapsed this year?", "did the Smith gift land?", or
-"what's year-to-date against last year?" by querying LGL directly.
+Any stdio MCP client can use it to look up constituents, list gifts in a date range, or fetch
+one person's giving history.
 
-Registers with Claude Code under the short name `lgl` (see Setup below).
+The server name is `lgl-mcp`. How you register it depends on the host — see Setup.
 
 ## Read-only by construction
 
@@ -29,17 +29,25 @@ not here.
    ```bash
    npm install
    ```
-4. Register with Claude Code:
-   ```bash
-   claude mcp add lgl -- node /path/to/little-green-light-mcp/index.js
+4. Point a stdio MCP host at this server. The command is `node`; the argument is the
+   absolute path to `index.js`:
+   ```json
+   {
+     "command": "node",
+     "args": ["/absolute/path/to/little-green-light-mcp/index.js"]
+   }
    ```
+   Wrap that in whatever config shape your host uses (`mcpServers`, a top-level
+   server map, and so on). No extra env vars are required if the key is in
+   `~/.config/lgl-mcp/env` or Keychain. Set `LGL_API_KEY` in the host's env
+   block only for a one-off override.
 
 ## Tools
 
 | Tool | What it does |
 |---|---|
-| `search_constituents` | Search by name or exact email address. |
-| `get_constituent` | Full profile for one constituent by id, including computed giving totals. |
+| `search_constituents` | Search by name or exact email address. Compact rows are identity only — no giving totals. |
+| `get_constituent` | Full profile for one constituent by id, including giving totals computed from the full gift history (0 if none). |
 | `get_constituent_gifts` | Giving history for one constituent. |
 | `search_gifts` | Search gifts by date range, across all constituents. |
 | `list_funds` | All configured funds (cached). |
@@ -47,10 +55,11 @@ not here.
 | `list_gift_categories` | All configured gift categories (cached). |
 | `list_gift_types` | All configured gift types (cached). |
 
-Every tool accepts `verbose: true` to get the full LGL object instead of the trimmed summary
-(id, name, email, phone, city/state, giving dates, lifetime total, etc.). List responses that
-are capped include a `note` field saying how many results were omitted — nothing is silently
-truncated.
+Every tool accepts `verbose: true` to get the full LGL object instead of the trimmed summary.
+Compact constituents include name, email, phone, and city/state. Giving dates and lifetime
+total are only on `get_constituent`. Compact gifts include date, amount, fund_id, note, and
+donor name (when expanded). List responses that are capped include a `note` field saying how
+many results were omitted — nothing is silently truncated.
 
 ## Confirmed query syntax
 
@@ -63,13 +72,14 @@ this was undocumented for several fields and confirmed by probing a live account
   out-of-range date zeroes `total_items`). Multiple `q[]` entries AND together.
 - Gifts have **no fund or amount filter** on this endpoint — `fund_id`, `fund`, `fund_ids`,
   `campaign_id`, `amount_from`, `amount_to` were all tried and rejected as unknown parameters.
-  `search_gifts` doesn't expose these; filter results client-side if needed.
+  `search_gifts` doesn't expose these; filter results client-side on `fund_id` / `note` if needed.
 - A gift's donor name only appears when the request includes
   `expand=first_name,last_name,org_name` — LGL doesn't nest a constituent object in the gift
   response otherwise.
 - `get_constituent`'s giving totals (first/last gift date, lifetime amount) aren't returned by
   LGL on the constituent object at all — they're computed here from that constituent's own gift
-  history (capped at 250 gifts; the response says so if a constituent has more).
+  history, paged to completion. A constituent with no gifts returns `lifetime_amount: 0`. A
+  safety cap still applies (10,000 gifts); the response says so if it is hit.
 
 ## Development
 

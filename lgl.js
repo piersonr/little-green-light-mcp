@@ -219,6 +219,36 @@ export async function getList(path, { limit = 25, offset = 0, ...params } = {}) 
   return normalizeList(payload, { limit, offset });
 }
 
+// Safety cap so a single get_constituent cannot walk an unbounded gift list.
+// 40 pages × 250 = 10,000 gifts; MCF is nowhere near this. If hit, callers
+// still get a truncated flag rather than a silently partial lifetime total.
+const ALL_LIST_PAGE_SIZE = 250;
+const ALL_LIST_MAX_PAGES = 40;
+
+/**
+ * Page a list endpoint to completion (or until ALL_LIST_MAX_PAGES).
+ * Used for get_constituent giving totals so lifetime_amount is exact.
+ */
+export async function getAllList(path, params = {}) {
+  const items = [];
+  let offset = 0;
+  let total = 0;
+  for (let page = 0; page < ALL_LIST_MAX_PAGES; page++) {
+    const result = await getList(path, {
+      ...params,
+      limit: ALL_LIST_PAGE_SIZE,
+      offset,
+    });
+    total = result.total;
+    items.push(...result.items);
+    if (result.items.length === 0 || items.length >= total) {
+      return { items, total, truncated: items.length < total };
+    }
+    offset += result.items.length;
+  }
+  return { items, total, truncated: items.length < total };
+}
+
 // --- small cached lookups --------------------------------------------------
 
 // Funds, appeals, gift types and categories are small and change rarely.

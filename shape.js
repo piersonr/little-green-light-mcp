@@ -81,32 +81,52 @@ function primaryLocation(obj) {
 export function shapeConstituent(raw, { verbose = false, giving } = {}) {
   if (verbose) return raw;
   const { city, state } = primaryLocation(raw);
-  return {
+  const base = {
     id: pick(raw, "id", "constituent_id"),
     name: fullName(raw),
     email: primaryEmail(raw),
     phone: primaryPhone(raw),
     city,
     state,
-    first_gift_date: giving?.firstGiftDate,
-    last_gift_date: giving?.lastGiftDate,
-    lifetime_amount: giving?.lifetimeAmount,
-    ...(giving?.truncated
-      ? { giving_note: `Totals computed from the first ${giving.sampledCount} of ${giving.totalCount} gifts on file.` }
+  };
+  // Giving totals are only present when the caller fetched them
+  // (get_constituent). search_constituents must not emit these keys as
+  // undefined — models treat that as "no giving history."
+  if (!giving) return base;
+  return {
+    ...base,
+    first_gift_date: giving.firstGiftDate,
+    last_gift_date: giving.lastGiftDate,
+    lifetime_amount: giving.lifetimeAmount,
+    ...(giving.truncated
+      ? {
+          giving_note: `Totals computed from the first ${giving.sampledCount} of ${giving.totalCount} gifts on file.`,
+        }
       : {}),
   };
 }
 
 /** Reduce a page of raw gifts into the summary shapeConstituent expects. */
 export function summarizeGiving(gifts, { totalCount, sampledCount } = {}) {
-  if (!gifts.length) return undefined;
+  const truncated =
+    totalCount !== undefined && sampledCount !== undefined && sampledCount < totalCount;
+  if (!gifts.length) {
+    return {
+      firstGiftDate: undefined,
+      lastGiftDate: undefined,
+      lifetimeAmount: 0,
+      truncated,
+      totalCount,
+      sampledCount,
+    };
+  }
   const dates = gifts.map((g) => pick(g, "received_date", "gift_date", "date")).filter(Boolean);
   const amounts = gifts.map((g) => Number(pick(g, "received_amount", "amount"))).filter(Number.isFinite);
   return {
     firstGiftDate: dates.length ? dates.reduce((a, b) => (a < b ? a : b)) : undefined,
     lastGiftDate: dates.length ? dates.reduce((a, b) => (a > b ? a : b)) : undefined,
     lifetimeAmount: amounts.length ? Math.round(amounts.reduce((a, b) => a + b, 0) * 100) / 100 : undefined,
-    truncated: totalCount !== undefined && sampledCount !== undefined && sampledCount < totalCount,
+    truncated,
     totalCount,
     sampledCount,
   };
@@ -124,6 +144,8 @@ export function shapeGift(raw, { verbose = false } = {}) {
     date: pick(raw, "received_date", "gift_date", "date"),
     amount: pick(raw, "received_amount", "amount"),
     fund: pick(raw, "fund_name") ?? raw?.fund?.name,
+    fund_id: pick(raw, "fund_id") ?? raw?.fund?.id,
+    note: pick(raw, "note"),
     appeal: pick(raw, "appeal_name") ?? raw?.appeal?.name,
     gift_type: pick(raw, "gift_type_name") ?? raw?.gift_type?.name,
     external_id: pick(raw, "external_id"),
