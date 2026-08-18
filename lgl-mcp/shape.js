@@ -6,12 +6,11 @@
 // verbose:true (exposed as a tool parameter) to get the untouched object
 // back when it's genuinely wanted.
 //
-// NOTE ON FIELD NAMES: LGL's exact JSON field names for constituents/gifts
-// are not fully confirmed against the live API yet (see the search-syntax
-// spike in the project plan). The pick() helper below tries several
-// plausible candidates per field rather than assuming one name, so this
-// keeps working once the spike confirms which names the account actually
-// returns — but the candidate lists here should be revisited then.
+// Field names below are confirmed against a live account (2026-08-18) by
+// inspecting raw responses, not guessed. pick() still tries a couple of
+// candidates per field as cheap defense against LGL varying field names
+// across endpoints (e.g. gift_categories uses display_name where funds and
+// appeals use name).
 
 /** Return the first defined, non-null value found at any of the given keys. */
 function pick(obj, ...keys) {
@@ -58,7 +57,12 @@ function primaryPhone(obj) {
 function primaryLocation(obj) {
   const direct = { city: pick(obj, "city"), state: pick(obj, "state", "state_code") };
   if (direct.city || direct.state) return direct;
-  const list = obj?.addresses;
+  // Confirmed field name: street_addresses (not "addresses"). Note: in
+  // practice this account often has the full address jammed into the
+  // free-text "street" field with city/state left null — that's a data
+  // quality fact about the account, not a bug here, so undefined is a
+  // legitimate result.
+  const list = obj?.street_addresses ?? obj?.addresses;
   if (Array.isArray(list) && list.length) {
     const preferred = list.find((a) => a?.is_preferred ?? a?.primary) ?? list[0];
     return {
@@ -69,7 +73,12 @@ function primaryLocation(obj) {
   return { city: undefined, state: undefined };
 }
 
-export function shapeConstituent(raw, { verbose = false } = {}) {
+// LGL's constituent object does not include any pre-aggregated giving
+// totals or first/last gift dates (confirmed by inspecting the full raw
+// object) — giving info has to be computed from that constituent's own
+// gifts. `giving` is optional and supplied by the caller (get_constituent
+// fetches it separately); shapeConstituent stays a pure mapping otherwise.
+export function shapeConstituent(raw, { verbose = false, giving } = {}) {
   if (verbose) return raw;
   const { city, state } = primaryLocation(raw);
   return {
@@ -79,14 +88,27 @@ export function shapeConstituent(raw, { verbose = false } = {}) {
     phone: primaryPhone(raw),
     city,
     state,
-    first_gift_date: pick(raw, "first_gift_date", "earliest_gift_date"),
-    last_gift_date: pick(raw, "last_gift_date", "latest_gift_date"),
-    lifetime_amount: pick(
-      raw,
-      "lifetime_amount",
-      "total_giving",
-      "lifetime_giving",
-    ),
+    first_gift_date: giving?.firstGiftDate,
+    last_gift_date: giving?.lastGiftDate,
+    lifetime_amount: giving?.lifetimeAmount,
+    ...(giving?.truncated
+      ? { giving_note: `Totals computed from the first ${giving.sampledCount} of ${giving.totalCount} gifts on file.` }
+      : {}),
+  };
+}
+
+/** Reduce a page of raw gifts into the summary shapeConstituent expects. */
+export function summarizeGiving(gifts, { totalCount, sampledCount } = {}) {
+  if (!gifts.length) return undefined;
+  const dates = gifts.map((g) => pick(g, "received_date", "gift_date", "date")).filter(Boolean);
+  const amounts = gifts.map((g) => Number(pick(g, "received_amount", "amount"))).filter(Number.isFinite);
+  return {
+    firstGiftDate: dates.length ? dates.reduce((a, b) => (a < b ? a : b)) : undefined,
+    lastGiftDate: dates.length ? dates.reduce((a, b) => (a > b ? a : b)) : undefined,
+    lifetimeAmount: amounts.length ? Math.round(amounts.reduce((a, b) => a + b, 0) * 100) / 100 : undefined,
+    truncated: totalCount !== undefined && sampledCount !== undefined && sampledCount < totalCount,
+    totalCount,
+    sampledCount,
   };
 }
 
@@ -95,7 +117,10 @@ export function shapeGift(raw, { verbose = false } = {}) {
   return {
     id: pick(raw, "id", "gift_id"),
     constituent_id: pick(raw, "constituent_id"),
-    constituent_name: fullName(raw?.constituent ?? {}) ?? pick(raw, "constituent_name"),
+    // Only populated when the caller requested expand=first_name,last_name,
+    // org_name — LGL returns those flat on the gift object, not nested
+    // (confirmed against the /gifts/search expand param).
+    constituent_name: fullName(raw) ?? fullName(raw?.constituent ?? {}),
     date: pick(raw, "received_date", "gift_date", "date"),
     amount: pick(raw, "received_amount", "amount"),
     fund: pick(raw, "fund_name") ?? raw?.fund?.name,
@@ -107,7 +132,8 @@ export function shapeGift(raw, { verbose = false } = {}) {
 
 export function shapeLookup(raw, { verbose = false } = {}) {
   if (verbose) return raw;
-  return { id: pick(raw, "id"), name: pick(raw, "name", "title") };
+  // gift_categories uses display_name; funds/appeals/gift_types use name.
+  return { id: pick(raw, "id"), name: pick(raw, "name", "display_name", "title") };
 }
 
 /**

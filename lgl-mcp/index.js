@@ -12,7 +12,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { request, getList, getCachedLookup, LglError } from "./lgl.js";
-import { shapeConstituent, shapeGift, shapeLookup, truncationNote } from "./shape.js";
+import { shapeConstituent, shapeGift, shapeLookup, summarizeGiving, truncationNote } from "./shape.js";
 
 const server = new McpServer({
   name: "lgl-mcp",
@@ -53,9 +53,13 @@ const paginationParams = {
 };
 
 function paginatedResult(items, shapeFn, verbose, meta) {
+  // truncationNote wants {total, returned, limit, offset}; `meta` (the
+  // getList() result) carries `items` instead of `returned` — bridge that
+  // here rather than relying on a field that was never actually present.
+  const note = truncationNote({ ...meta, returned: items.length });
   return textResult({
     results: items.map((item) => shapeFn(item, { verbose })),
-    ...(truncationNote(meta) ? { note: truncationNote(meta) } : {}),
+    ...(note ? { note } : {}),
   });
 }
 
@@ -79,44 +83,49 @@ for (const { name, path, noun } of LOOKUPS) {
       inputSchema: { verbose: verboseParam },
     },
     safe(async ({ verbose }) => {
-      const items = await getCachedLookup(path);
-      return textResult({ results: items.map((item) => shapeLookup(item, { verbose })) });
+      const { items, total, truncated } = await getCachedLookup(path);
+      return textResult({
+        results: items.map((item) => shapeLookup(item, { verbose })),
+        ...(truncated
+          ? { note: `Showing ${items.length} of ${total} total — this list exceeds the cached page size.` }
+          : {}),
+      });
     }),
   );
 }
 
 // --- constituents --------------------------------------------------------
 
+// LGL's /constituents/search takes q[]=field=value pairs, not free text —
+// confirmed against a live account (2026-08-18). "name=brady" is LGL's own
+// documented example; "eaddr" for email was undocumented and found by
+// probing the live API (guesses like "email"/"email_address" 400).
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
 server.registerTool(
   "search_constituents",
   {
     title: "search_constituents",
     description:
-      "Search LGL constituents by name or email. Returns a compact summary " +
-      "per match (name, email, phone, city/state, giving dates and lifetime " +
-      "total) — pass verbose:true for the full record.",
+      "Search LGL constituents by name or email address. Returns a compact " +
+      "summary per match (name, email, phone, city/state, giving dates and " +
+      "lifetime total) — pass verbose:true for the full record.",
     inputSchema: {
-      query: z.string().min(1).describe("Name, email, or other search text."),
+      query: z
+        .string()
+        .min(1)
+        .describe("A name (e.g. 'Pierson') or an email address to match exactly."),
       verbose: verboseParam,
       ...paginationParams,
     },
   },
   safe(async ({ query, verbose, limit, offset }) => {
-    // NOTE: LGL's documented syntax (q[]=) and the community MCP server's
-    // syntax (search=) disagree and neither is confirmed against a live
-    // account yet. Try the documented q[] form first; the spike in the
-    // project plan will settle this and this fallback can be simplified
-    // once it does.
-    let list;
-    try {
-      list = await getList("/constituents/search", { "q[]": query, limit, offset });
-    } catch (err) {
-      if (err instanceof LglError && err.status === 422) {
-        list = await getList("/constituents/search", { search: query, limit, offset });
-      } else {
-        throw err;
-      }
-    }
+    const field = EMAIL_RE.test(query) ? "eaddr" : "name";
+    const list = await getList("/constituents/search", {
+      "q[]": `${field}=${query}`,
+      limit,
+      offset,
+    });
     return paginatedResult(list.items, shapeConstituent, verbose, list);
   }),
 );
@@ -133,7 +142,18 @@ server.registerTool(
   },
   safe(async ({ id, verbose }) => {
     const raw = await request(`/constituents/${id}`);
-    return textResult(shapeConstituent(raw, { verbose }));
+    if (verbose) return textResult(shapeConstituent(raw, { verbose }));
+
+    // LGL doesn't return giving totals on the constituent object itself —
+    // compute them from that constituent's own gift history. Capped at 250
+    // (a large page for one person's giving history) so one question can't
+    // fan out into unbounded pagination; shapeConstituent reports if capped.
+    const giftsPage = await getList(`/constituents/${id}/gifts`, { limit: 250, offset: 0 });
+    const giving = summarizeGiving(giftsPage.items, {
+      totalCount: giftsPage.total,
+      sampledCount: giftsPage.items.length,
+    });
+    return textResult(shapeConstituent(raw, { verbose, giving }));
   }),
 );
 
@@ -156,31 +176,38 @@ server.registerTool(
 
 // --- gifts -----------------------------------------------------------------
 
+// Confirmed against a live account (2026-08-18): date_from/date_to are real
+// filters (an out-of-range date zeroes total_items). fund_id, fund, fund_ids,
+// campaign_id, amount_from/amount_to were all tried and rejected as unknown
+// query parameters — LGL does not appear to expose fund/amount filtering on
+// this endpoint, so it's left out here rather than silently ignored.
 server.registerTool(
   "search_gifts",
   {
     title: "search_gifts",
     description:
-      "Search gifts across all constituents by date range, amount, or fund. " +
-      "Useful for totals and reconciliation questions (e.g. 'gifts in 2025').",
+      "Search gifts across all constituents by date range. Useful for totals " +
+      "and reconciliation questions (e.g. 'gifts in 2025'). Fund/amount " +
+      "filtering isn't exposed by LGL's search endpoint — filter the results " +
+      "client-side if needed.",
     inputSchema: {
-      query: z
-        .string()
-        .optional()
-        .describe("Free-text search term, if applicable."),
       from_date: z.string().optional().describe("YYYY-MM-DD, inclusive."),
       to_date: z.string().optional().describe("YYYY-MM-DD, inclusive."),
-      fund_id: z.union([z.string(), z.number()]).optional(),
       verbose: verboseParam,
       ...paginationParams,
     },
   },
-  safe(async ({ query, from_date, to_date, fund_id, verbose, limit, offset }) => {
+  safe(async ({ from_date, to_date, verbose, limit, offset }) => {
+    const terms = [];
+    if (from_date) terms.push(`date_from=${from_date}`);
+    if (to_date) terms.push(`date_to=${to_date}`);
+
     const list = await getList("/gifts/search", {
-      "q[]": query,
-      from_date,
-      to_date,
-      fund_id,
+      ...(terms.length ? { "q[]": terms } : {}),
+      // Confirmed against the live API: this is how a donor's name ends up
+      // on the gift row at all — without it, constituent_name is always
+      // empty (LGL doesn't nest a constituent object in the gift response).
+      expand: "first_name,last_name,org_name",
       limit,
       offset,
     });

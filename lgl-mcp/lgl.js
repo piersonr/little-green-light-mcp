@@ -227,10 +227,13 @@ const lookupCache = new Map();
 
 export async function getCachedLookup(path) {
   if (lookupCache.has(path)) return lookupCache.get(path);
-  // These lists are short; ask for a generous page rather than paging.
-  const { items } = await getList(path, { limit: 250 });
-  lookupCache.set(path, items);
-  return items;
+  // These lists are short; ask for a generous page rather than paging. If an
+  // account ever exceeds this, say so rather than silently dropping items —
+  // callers can check .truncated.
+  const { items, total } = await getList(path, { limit: 250 });
+  const result = { items, total, truncated: total > items.length };
+  lookupCache.set(path, result);
+  return result;
 }
 
 export const __testing = { normalizeList, buildUrl, describeStatus };

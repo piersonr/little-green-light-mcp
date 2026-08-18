@@ -36,10 +36,10 @@ not here.
 
 | Tool | What it does |
 |---|---|
-| `search_constituents` | Search by name or email. |
-| `get_constituent` | Full profile for one constituent by id. |
+| `search_constituents` | Search by name or exact email address. |
+| `get_constituent` | Full profile for one constituent by id, including computed giving totals. |
 | `get_constituent_gifts` | Giving history for one constituent. |
-| `search_gifts` | Search gifts by date range, amount, or fund. |
+| `search_gifts` | Search gifts by date range, across all constituents. |
 | `list_funds` | All configured funds (cached). |
 | `list_appeals` | All configured appeals (cached). |
 | `list_gift_categories` | All configured gift categories (cached). |
@@ -50,12 +50,24 @@ Every tool accepts `verbose: true` to get the full LGL object instead of the tri
 are capped include a `note` field saying how many results were omitted — nothing is silently
 truncated.
 
-## Known open item
+## Confirmed query syntax
 
-`search_constituents`'s exact query syntax is unconfirmed against a live account — LGL's
-published docs describe `q[]=` params, a community MCP server uses `search=`. The tool tries
-`q[]=` first and falls back to `search=` on a 422. Confirm which one the live account actually
-wants once a key is available, and simplify this to a single call.
+LGL's `/constituents/search` and `/gifts/search` take `q[]=field=value` pairs, not free text —
+this was undocumented for several fields and confirmed by probing a live account:
+
+- Constituents: `name=<text>` (LGL's own documented example) or `eaddr=<email>` for an exact
+  email match (undocumented; guesses like `email=`/`email_address=` were rejected).
+- Gifts: `date_from=YYYY-MM-DD` / `date_to=YYYY-MM-DD` (confirmed real filters — an
+  out-of-range date zeroes `total_items`). Multiple `q[]` entries AND together.
+- Gifts have **no fund or amount filter** on this endpoint — `fund_id`, `fund`, `fund_ids`,
+  `campaign_id`, `amount_from`, `amount_to` were all tried and rejected as unknown parameters.
+  `search_gifts` doesn't expose these; filter results client-side if needed.
+- A gift's donor name only appears when the request includes
+  `expand=first_name,last_name,org_name` — LGL doesn't nest a constituent object in the gift
+  response otherwise.
+- `get_constituent`'s giving totals (first/last gift date, lifetime amount) aren't returned by
+  LGL on the constituent object at all — they're computed here from that constituent's own gift
+  history (capped at 250 gifts; the response says so if a constituent has more).
 
 ## Development
 
