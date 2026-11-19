@@ -1,19 +1,73 @@
 # little-green-light-mcp
 
-A read-only [MCP](https://modelcontextprotocol.io) server for the Little Green Light donor CRM.
-Any stdio MCP client can use it to look up constituents, list gifts in a date range, or fetch
-one person's giving history.
+A [MCP](https://modelcontextprotocol.io) server for the Little Green Light donor CRM.
+Any stdio MCP client can look up constituents, list gifts in a date range, fetch
+one person's giving history, and preview and apply an approved constituent name edit.
 
 The server name is `lgl-mcp`. How you register it depends on the host — see Setup.
 
-## Read-only by construction
+## Bounded name updates
 
-This server has **no create, update, or delete tools** — not disabled, absent. `lgl.js` exposes
-only a `GET` request function; there is no code path anywhere in this project that can mutate a
-donor record. Run `npm run audit:readonly` after any change to confirm mechanically.
+The eight lookup tools remain read-only: `lgl.js` exposes only a `GET` request function.
+The separate `name-updates.js` module implements the only write transport: a single
+name-only `PATCH` to an existing constituent. There are no create, delete, gift,
+contact-information, group, note, or relationship write tools.
 
-Any future write path (e.g. syncing donations) belongs in LGL's own reviewed Integration Queue,
-not here.
+1. Call `preview_constituent_name_update` with an exact constituent ID and explicit
+   name fields. Resolve the constituent identity before preparing the preview.
+2. Show the returned before/after changes to the user and obtain their approval of
+   those exact changes. Creating a preview is not approval to apply it.
+3. Call `apply_constituent_name_update` with that preview's `confirmation_token`
+   and `confirmed: true` only after approval. The token is one-use and belongs to
+   that server session; restarting clears outstanding previews.
+
+The apply tool re-reads the complete constituent and refuses the update if any
+returned data changed after preview. It sends only the changed name fields, then
+re-reads and compares all name fields and other returned profile data. Only
+`updated_at` and the derived `sort_name` are allowed to change additionally.
+Already-correct names return `unchanged` and require no write.
+
+Permitted fields: `prefix`, `first_name`, `middle_name`, `last_name`, `suffix`,
+`spouse_name`, `org_name`, and `addressee` (the label/display name). For an individual,
+`org_name` describes their employer and is refused. For an organization, only
+`org_name` and `addressee` may be edited; contact-person names are refused. A linked
+spouse's name must be edited on that person's own constituent. Spouse-field edits
+are refused when relationships are missing or contain a spouse/partner link.
+Blank strings explicitly clear an optional field; leaving a prospect with no name
+is refused. A field omitted from the API response cannot be previewed or changed.
+Adding a spouse to an addressee does not create or link another record.
+
+Writes are never retried automatically, including timeouts, rate limits, and server
+errors. A verification failure reports whether the saved names differed, unrelated
+returned fields changed, or the saved record could not be read. Inspect LGL before
+preparing another preview; the tool does not retry or roll back a failed verification.
+Previews and locks are local to one server process. The API has no documented
+conditional-update mechanism here, so another client could still edit between
+the final read and PATCH. Verification detects returned differences; it cannot
+make that interval atomic or verify data the API does not return.
+
+### Native steward assignments: unavailable
+
+On 2026-10-26, all 33 resource schemas in LGL's published API index were checked.
+They expose constituent name updates, but no native steward, solicitor, or
+relationship-manager assignment field or endpoint. This server therefore cannot
+write native steward assignments. It does not substitute groups, custom fields,
+or constituent relationships for the native Stewards feature.
+
+LGL's [developer guidance](https://help.littlegreenlight.com/article/603-for-software-developers-using-the-lgl-api)
+explains that not all fields are available through the API and directs requests
+for additional fields to LGL support. A documented steward read/write endpoint
+and its staff-ID mapping are needed to implement the remaining requested feature.
+
+### Validation scope
+
+Name updates are tested offline with simulated API responses, including a complete
+stdio MCP preview/apply/verify exchange. No live donor update was used for testing.
+The published constituent `UpdateBody` marks first/last names and email arrays as
+required. The connector deliberately sends only the requested changed name fields;
+if LGL rejects that narrow PATCH, it reports the error without resending contact
+data or broadening the payload. Live acceptance of this narrow payload remains
+unverified and needs an explicitly approved edit to an identified constituent.
 
 ## Setup
 
@@ -49,13 +103,15 @@ not here.
 | `search_constituents` | Search by name or exact email address. Compact rows are identity only — no giving totals. |
 | `get_constituent` | Full profile for one constituent by id, including giving totals computed from the full gift history (0 if none). |
 | `get_constituent_gifts` | Giving history for one constituent. |
+| `preview_constituent_name_update` | Read-only preview of exact name changes; returns a one-use token. |
+| `apply_constituent_name_update` | Apply an explicitly approved preview and verify the saved record. |
 | `search_gifts` | Search gifts by date range, across all constituents. |
 | `list_funds` | All configured funds (cached). |
 | `list_appeals` | All configured appeals (cached). |
 | `list_gift_categories` | All configured gift categories (cached). |
 | `list_gift_types` | All configured gift types (cached). |
 
-Every tool accepts `verbose: true` to get the full LGL object instead of the trimmed summary.
+Every lookup tool accepts `verbose: true` to get the full LGL object instead of the trimmed summary.
 Compact constituents include name, email, phone, and city/state. Giving dates and lifetime
 total are only on `get_constituent`. Compact gifts include date, amount, fund_id, note, and
 donor name (when expanded). List responses that are capped include a `note` field saying how
@@ -85,11 +141,15 @@ this was undocumented for several fields and confirmed by probing a live account
 
 ```bash
 npm run inspect          # MCP Inspector — exercise tools interactively
-npm run audit:readonly   # mechanical check: no POST/PATCH/PUT/DELETE anywhere
+npm run audit:readonly   # static check: write methods isolated to name-updates.js
+npm test                 # offline service, transport, and stdio MCP tests
+npm run audit:safety     # both checks above
 ```
 
 ## Rate limits
 
-LGL allows 300 API calls per 5-minute window. `lgl.js` throttles internally (sliding window)
-and retries with backoff on 429/5xx, so a broad question that fans out into many calls degrades
-gracefully instead of erroring.
+LGL allows 300 API calls per 5-minute window. Both transports share a sliding-window
+throttle. GET requests retry with backoff on 429/5xx. The name writer sends a single
+PATCH without retries, then verifies with GET. Restart or reconnect the MCP client
+after installing an update so it discovers the new tools; existing client
+registration and credentials do not need to change.

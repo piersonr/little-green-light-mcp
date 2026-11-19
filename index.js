@@ -1,23 +1,19 @@
 #!/usr/bin/env node
-// Read-only MCP server for the Little Green Light donor CRM.
-//
-// SAFETY INVARIANT: this file registers eight tools, none of which write to
-// LGL. lgl.js only exposes a GET request() function — there is no code path
-// anywhere in this project that can create, update, or delete a donor
-// record. Any future write path belongs in LGL's own reviewed Integration
-// Queue, not here. Verify this mechanically with `npm run audit:readonly`
-// before every registration change.
+// Little Green Light MCP: existing lookups remain read-only. A separate
+// preview/apply pair permits only name edits on existing constituents.
+// Native Stewards are not exposed by the published LGL API.
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { request, getList, getAllList, getCachedLookup, LglError } from "./lgl.js";
 import { shapeConstituent, shapeGift, shapeLookup, summarizeGiving, truncationNote } from "./shape.js";
+import { nameUpdates, NAME_FIELDS } from "./name-updates.js";
 
 const server = new McpServer({
   name: "lgl-mcp",
-  version: "0.1.0",
-  title: "Little Green Light (read-only)",
+  version: "0.2.0",
+  title: "Little Green Light (lookups and name updates)",
 });
 
 // --- shared helpers ----------------------------------------------------
@@ -171,6 +167,51 @@ server.registerTool(
   safe(async ({ id, verbose, limit, offset }) => {
     const list = await getList(`/constituents/${id}/gifts`, { limit, offset });
     return paginatedResult(list.items, shapeGift, verbose, list);
+  }),
+);
+
+// --- narrowly scoped constituent name updates ------------------------------
+
+server.registerTool(
+  "preview_constituent_name_update",
+  {
+    title: "Preview a prospect name change",
+    description:
+      "Read an existing constituent and preview exact name-field changes. " +
+      "Returns a one-use confirmation token. Does not write. Show the preview " +
+      "to the user and obtain approval before applying it. Native steward " +
+      "assignments are not supported by LGL's published API.",
+    inputSchema: {
+      id: z.union([z.string().regex(/^[1-9]\d*$/), z.number().int().positive()]),
+      changes: z.object(Object.fromEntries(NAME_FIELDS.map(field => [
+        field, z.string().max(250).optional(),
+      ]))).strict().describe("Only the explicitly requested name fields. Blank strings explicitly clear a field."),
+    },
+    annotations: { readOnlyHint: true, openWorldHint: true },
+  },
+  safe(async args => textResult(await nameUpdates.preview(args))),
+);
+
+server.registerTool(
+  "apply_constituent_name_update",
+  {
+    title: "Apply an approved prospect name change",
+    description:
+      "Write only the name changes in an approved preview for one existing " +
+      "constituent. Requires explicit user approval of that preview. Re-reads " +
+      "the record first, refuses stale previews, sends one name-only PATCH " +
+      "without retries, then re-reads and verifies the saved names and other " +
+      "profile fields. Does not create constituents or edit stewards, contact " +
+      "information, gifts, groups, notes, or relationships.",
+    inputSchema: {
+      confirmation_token: z.string().regex(/^[a-f0-9]{48}$/),
+      confirmed: z.literal(true).describe("True only after the user approves the exact preview."),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+  },
+  safe(async args => {
+    const result = await nameUpdates.apply(args);
+    return { ...textResult(result), ...(result.verified === false ? { isError: true } : {}) };
   }),
 );
 

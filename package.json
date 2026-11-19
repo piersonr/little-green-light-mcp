@@ -1,15 +1,17 @@
 {
   "name": "lgl-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "Read-only MCP server for the Little Green Light donor CRM",
+  "description": "Little Green Light lookups and previewed, verified constituent name updates",
   "type": "module",
   "main": "index.js",
   "engines": { "node": ">=18" },
   "scripts": {
     "start": "node index.js",
     "inspect": "npx -y @modelcontextprotocol/inspector node index.js",
-    "audit:readonly": "./scripts/audit-readonly.sh"
+    "audit:readonly": "./scripts/audit-readonly.sh",
+    "test": "node --test test/*.test.js",
+    "audit:safety": "npm run audit:readonly && npm test"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
