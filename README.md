@@ -2,7 +2,8 @@
 
 A [MCP](https://modelcontextprotocol.io) server for the Little Green Light donor CRM.
 Any stdio MCP client can look up constituents, list gifts in a date range, fetch
-one person's giving history, and preview and apply an approved constituent name edit.
+one person's giving history, and preview and apply approved constituent name and
+street-address edits.
 
 The server name is `lgl-mcp`. How you register it depends on the host — see Setup.
 
@@ -69,6 +70,62 @@ if LGL rejects that narrow PATCH, it reports the error without resending contact
 data or broadening the payload. Live acceptance of this narrow payload remains
 unverified and needs an explicitly approved edit to an identified constituent.
 
+## Bounded street-address updates
+
+`address-updates.js` is the second isolated write transport. It follows the same
+pattern as name updates: a read-only preview, a one-use confirmation token, a stale
+check on apply, exactly one write with no retries, then a re-read that verifies the
+result.
+
+1. `list_constituent_addresses(id)` shows every street address with its id, street,
+   city, state, postal code, country, type, `is_preferred` and `not_current`.
+2. `preview_constituent_address_update(id, action, ...)` writes nothing. Actions:
+   - `add` with `address: {street, city, state, postal_code, address_type?}` and an
+     optional `make_preferred: true`.
+   - `update` with `address_id` and only the fields to change, and/or
+     `make_preferred: true`.
+   - `mark_inactive` with `address_id`, which sets LGL's `not_current` flag.
+
+   It re-reads the constituent and its address list and returns the current
+   addresses, the exact addresses after the change, the exact request body, and a
+   token tied to a fingerprint of the profile plus every address.
+3. `apply_constituent_address_update(confirmation_token, confirmed: true)` re-reads
+   and refuses if anything changed, sends one `POST` or `PATCH`, then re-reads and
+   checks the target address, every other address and every profile field.
+   Mismatches come back as `verification_failed` with a `problems` list and the tool
+   result flagged as an error. Nothing is retried or rolled back automatically.
+
+Endpoints, confirmed in LGL's API docs (`api-docs/static.html`, "Street Address
+Management") and a read-only GET of a live record on 2026-11-19:
+
+| Purpose | Endpoint |
+|---|---|
+| List | `GET /constituents/{id}/street_addresses` |
+| Create one | `POST /constituents/{id}/street_addresses` (adds; does not replace others) |
+| Update one | `PATCH /street_addresses/{id}` |
+| Address types | `GET /types/street_address_types` (Home 1, Work 2, Other 3, School 4) |
+
+Fields sent: `street`, `city`, `state`, `postal_code`, `street_address_type_id`,
+`is_preferred`, `not_current`. County, country and seasonal fields are never sent.
+`DELETE /street_addresses/{id}` exists in LGL but is deliberately not implemented.
+
+Rules built in because of LGL behavior seen in the October 2026 cleanup (AGENTS.md):
+
+- Every write sends `is_preferred` and `not_current` explicitly. A PATCH that
+  omits them silently reactivates an inactive address and makes it preferred.
+- The preferred flag is never cleared on an address that has siblings, because LGL
+  then promotes another address of its own choosing. To retire a preferred address,
+  first add or update the replacement with `make_preferred: true` (the preview shows
+  the old one losing the flag), then `mark_inactive` the old one.
+- Input is validated: two-letter US state or territory codes, ZIP or ZIP+4, a
+  non-empty street, and no city/state/ZIP packed into `street`. Only US addresses
+  can be edited, and a new address cannot duplicate an active one.
+
+Address updates are tested offline with a simulated LGL and a stdio MCP exchange.
+No live address write was made during development. LGL's real acceptance of these
+payloads, and whether it clears the old preferred flag when a new address is made
+preferred, get confirmed by the first approved edit. Verification reports it if not.
+
 ## Setup
 
 1. Get an API key from LGL: **Settings → Integration Settings → LGL API**.
@@ -105,6 +162,9 @@ unverified and needs an explicitly approved edit to an identified constituent.
 | `get_constituent_gifts` | Giving history for one constituent. |
 | `preview_constituent_name_update` | Read-only preview of exact name changes; returns a one-use token. |
 | `apply_constituent_name_update` | Apply an explicitly approved preview and verify the saved record. |
+| `list_constituent_addresses` | Read-only list of one constituent's street addresses with ids and flags. |
+| `preview_constituent_address_update` | Read-only preview of an add, update or mark-inactive; returns a one-use token. |
+| `apply_constituent_address_update` | Apply an explicitly approved address preview and verify every address and profile field. |
 | `search_gifts` | Search gifts by date range, across all constituents. |
 | `list_funds` | All configured funds (cached). |
 | `list_appeals` | All configured appeals (cached). |
@@ -141,7 +201,7 @@ this was undocumented for several fields and confirmed by probing a live account
 
 ```bash
 npm run inspect          # MCP Inspector — exercise tools interactively
-npm run audit:readonly   # static check: write methods isolated to name-updates.js
+npm run audit:readonly   # static check: write methods isolated to the two update modules
 npm test                 # offline service, transport, and stdio MCP tests
 npm run audit:safety     # both checks above
 ```

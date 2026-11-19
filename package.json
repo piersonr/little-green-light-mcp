@@ -1,8 +1,8 @@
 {
   "name": "lgl-mcp",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
-  "description": "Little Green Light lookups and previewed, verified constituent name updates",
+  "description": "Little Green Light lookups and previewed, verified constituent name and street-address updates",
   "type": "module",
   "main": "index.js",
   "engines": { "node": ">=18" },
