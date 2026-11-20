@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createAddressUpdateService, postStreetAddress, patchStreetAddress } from "../address-updates.js";
+import { createAddressUpdateService, postStreetAddress, patchStreetAddress, WRITE_WINDOW_MS } from "../address-updates.js";
+
+const soon = () => ({ notAfter: Date.now() + 60000 });
 
 // Never load real credentials or send network traffic in this suite.
 process.env.LGL_API_KEY = "offline-test-key";
@@ -22,19 +24,21 @@ const TYPES = { items: [{ id: 1, name: "Home" }, { id: 2, name: "Work" }, { id: 
  * is_preferred on one address clears it on the others. `misbehave` lets a
  * test simulate LGL saving something different from what was sent.
  */
-function fixture(addresses = [addr(1, { is_preferred: true }), addr(2)], { misbehave = s => s, failWrite, resetOmitted = false } = {}) {
+function fixture(addresses = [addr(1, { is_preferred: true }), addr(2)], { misbehave = s => s, failWrite, resetOmitted = false, types = TYPES } = {}) {
   let state = { record: profile(), addresses: structuredClone(addresses) };
   let nextId = 100;
-  const reads = [], writes = [];
+  const reads = [], writes = [], events = [];
   const commit = (changedId, preferred) => {
     if (preferred) state.addresses.forEach(a => { if (a.id !== changedId) a.is_preferred = false; });
     state.record.updated_at = "after";
     state = misbehave(state);
   };
   const service = createAddressUpdateService({
+    capacity: async n => { events.push(`capacity ${n}`); },
     read: async (path, params) => {
       reads.push(path);
-      if (path === "/types/street_address_types") return TYPES;
+      events.push(`read ${path}`);
+      if (path === "/types/street_address_types") return types;
       if (path === "/constituents/42") return { ...structuredClone(state.record), street_addresses: structuredClone(state.addresses) };
       if (path === "/constituents/42/street_addresses") {
         assert.deepEqual(params, { limit: 100, offset: 0 });
@@ -42,14 +46,16 @@ function fixture(addresses = [addr(1, { is_preferred: true }), addr(2)], { misbe
       }
       throw new Error(`unexpected read ${path}`);
     },
-    post: async (id, body) => {
+    post: async (id, body, options) => {
+      events.push({ write: "POST", notAfter: options?.notAfter });
       writes.push({ method: "POST", id, body: structuredClone(body) });
       if (failWrite) throw failWrite;
-      const created = addr(nextId++, { ...body, street_type_name: TYPES.items.find(t => t.id === body.street_address_type_id).name });
+      const created = addr(nextId++, { ...body, street_type_name: types.items.find(t => t.id === body.street_address_type_id).name });
       state.addresses.push(created);
       commit(created.id, body.is_preferred);
     },
-    patch: async (id, body) => {
+    patch: async (id, body, options) => {
+      events.push({ write: "PATCH", notAfter: options?.notAfter });
       writes.push({ method: "PATCH", id, body: structuredClone(body) });
       if (failWrite) throw failWrite;
       const a = state.addresses.find(x => x.id === id);
@@ -63,7 +69,7 @@ function fixture(addresses = [addr(1, { is_preferred: true }), addr(2)], { misbe
       commit(id, body.is_preferred);
     },
   });
-  return { ...service, reads, writes, mutate: fn => { fn(state); } };
+  return { ...service, reads, writes, events, mutate: fn => { fn(state); } };
 }
 const apply = (service, preview) => service.apply({ confirmation_token: preview.confirmation_token, confirmed: true });
 const NEW = { street: "12 Example Way", city: "Moraga", state: "ca", postal_code: "94556-1234" };
@@ -291,12 +297,14 @@ test("fixed transports hit only the documented endpoints and require both flags"
     return { ok: true };
   };
   await postStreetAddress(42, { street: "1 A St", city: "Moraga", state: "CA", postal_code: "94556",
-    street_address_type_id: 1, is_preferred: false, not_current: false });
-  await patchStreetAddress(7, { is_preferred: false, not_current: true });
+    street_address_type_id: 1, is_preferred: false, not_current: false }, soon());
+  await patchStreetAddress(7, { is_preferred: false, not_current: true }, soon());
   assert.deepEqual(calls.map(c => [c.method, c.url]), [
     ["POST", "https://api.littlegreenlight.com/api/v1/constituents/42/street_addresses"],
     ["PATCH", "https://api.littlegreenlight.com/api/v1/street_addresses/7"],
   ]);
+  await assert.rejects(patchStreetAddress(7, { is_preferred: false, not_current: true }), /deadline/);
+  await assert.rejects(patchStreetAddress(7, { is_preferred: false, not_current: true }, { notAfter: Date.now() - 1 }), /not sent.*fresh preview/);
   await assert.rejects(patchStreetAddress(7, { city: "Moraga" }), /explicitly/);
   await assert.rejects(patchStreetAddress(7, { is_preferred: false, not_current: true, country: "US" }), /outside/);
   await assert.rejects(patchStreetAddress("7/x", { is_preferred: false, not_current: true }), /exact/);
@@ -312,7 +320,7 @@ test("write transport failures never retry or leak response bodies", async () =>
       if (status === "network") throw new Error("private-secret-payload");
       return { ok: false, status, text: async () => "private-secret-payload" };
     };
-    await assert.rejects(patchStreetAddress(7, { is_preferred: false, not_current: true }), error => {
+    await assert.rejects(patchStreetAddress(7, { is_preferred: false, not_current: true }, soon()), error => {
       assert.equal(error.message.includes("private-secret-payload"), false);
       assert.match(error.message, /retry|retried/);
       return true;
@@ -429,4 +437,28 @@ test("a new street is checked against the saved city; an unsplit address must be
   assert.equal((await apply(service, fixed)).verified, true);
   const inactive = await service.preview({ id: 42, action: "mark_inactive", address_id: 2 });
   assert.equal((await apply(service, inactive)).verified, true);
+});
+
+test("apply waits for rate-limit room before its stale check and writes under a short deadline", async () => {
+  const service = fixture();
+  const preview = await service.preview({ id: 42, action: "mark_inactive", address_id: 2 });
+  service.events.length = 0;
+  const started = Date.now();
+  assert.equal((await apply(service, preview)).verified, true);
+  assert.equal(service.events[0], "capacity 4");
+  const writeAt = service.events.findIndex(e => typeof e === "object");
+  assert.ok(service.events.slice(1, writeAt).every(e => e.startsWith("read ")), JSON.stringify(service.events));
+  const { notAfter } = service.events[writeAt];
+  assert.ok(notAfter >= started + WRITE_WINDOW_MS && notAfter <= Date.now() + WRITE_WINDOW_MS);
+});
+
+test("a new address without a type uses LGL's id for Home, not a hard-coded one", async () => {
+  const types = { items: [{ id: 7, name: "Work" }, { id: 9, name: "Home" }] };
+  const service = fixture([], { types });
+  const preview = await service.preview({ id: 42, action: "add", address: NEW });
+  assert.equal(preview.request.body.street_address_type_id, 9);
+  assert.equal(preview.addresses_after.at(-1).address_type, "Home");
+  assert.equal((await apply(service, preview)).verified, true);
+  await assert.rejects(fixture([], { types: { items: [{ id: 7, name: "Work" }] } })
+    .preview({ id: 42, action: "add", address: NEW }), /no street address type named 'Home'/);
 });

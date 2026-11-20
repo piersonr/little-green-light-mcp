@@ -95,6 +95,20 @@ export async function throttle() {
   }
 }
 
+/**
+ * Wait until at least `n` calls are free in this process's window, without
+ * taking any. Writers call it before their stale check so the rate limiter
+ * does not hold a write after that check has passed.
+ */
+export async function waitForCapacity(n) {
+  for (;;) {
+    const cutoff = Date.now() - RATE_WINDOW_MS;
+    while (callTimes.length && callTimes[0] < cutoff) callTimes.shift();
+    if (callTimes.length <= RATE_LIMIT - n) return;
+    await sleep(callTimes[0] - cutoff + 50);
+  }
+}
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // --- requests --------------------------------------------------------------

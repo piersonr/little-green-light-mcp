@@ -19,7 +19,7 @@
 //    module never clears is_preferred on a preferred address that has
 //    siblings; make another address preferred instead.
 import { createHash, randomBytes } from "node:crypto";
-import { request, throttle, authenticatedHeaders, LglError } from "./lgl.js";
+import { request, throttle, waitForCapacity, authenticatedHeaders, LglError } from "./lgl.js";
 import { constituentLocks } from "./locks.js";
 
 const API = "https://api.littlegreenlight.com/api/v1";
@@ -244,8 +244,17 @@ function checkBody(body, allowed) {
   }
 }
 
-async function send(method, url, body, what) {
+// How long a write may follow its stale check. A write that has to wait
+// longer for the rate limiter is abandoned rather than sent against a state
+// that was checked too long ago.
+export const WRITE_WINDOW_MS = 5000;
+
+async function send(method, url, body, what, notAfter) {
+  if (!Number.isFinite(notAfter)) fail("Every address write needs a deadline from its stale check.");
   await throttle();
+  if (Date.now() > notAfter) {
+    fail(`The ${what} was not sent: the rate-limit wait outlasted the stale check. Prepare a fresh preview.`);
+  }
   const headers = { ...authenticatedHeaders(), "Content-Type": "application/json" };
   let response;
   try {
@@ -266,23 +275,24 @@ async function send(method, url, body, what) {
 }
 
 /** POST one new address to an existing constituent. Exported for offline tests. */
-export async function postStreetAddress(constituentIdValue, body) {
+export async function postStreetAddress(constituentIdValue, body, { notAfter } = {}) {
   const id = exactId(constituentIdValue, "constituent");
   checkBody(body, POST_FIELDS);
-  await send("POST", `${API}/constituents/${id}/street_addresses`, body, "address create");
+  await send("POST", `${API}/constituents/${id}/street_addresses`, body, "address create", notAfter);
 }
 
 /** PATCH one existing address. Exported for offline tests. */
-export async function patchStreetAddress(addressIdValue, body) {
+export async function patchStreetAddress(addressIdValue, body, { notAfter } = {}) {
   const id = exactId(addressIdValue, "street address");
   checkBody(body, PATCH_FIELDS);
-  await send("PATCH", `${API}/street_addresses/${id}`, body, "address update");
+  await send("PATCH", `${API}/street_addresses/${id}`, body, "address update", notAfter);
 }
 
 // --- service ----------------------------------------------------------------
 
 export function createAddressUpdateService({
   read = request, post = postStreetAddress, patch = patchStreetAddress, locks = constituentLocks,
+  capacity = waitForCapacity,
 } = {}) {
   const plans = new Map();
   const busy = locks;
@@ -324,7 +334,9 @@ export function createAddressUpdateService({
       fail("make_preferred: false is not supported. LGL promotes another address on its own when the flag is cleared; make the intended address preferred instead.");
     }
     const addressId = action === "add" ? null : exactId(args.address_id, "street address");
-    const typeId = fields.address_type ? await resolveTypeId(fields.address_type) : undefined;
+    // A new address defaults to Home, looked up like any other type.
+    const typeName = fields.address_type ?? (action === "add" ? "Home" : undefined);
+    const typeId = typeName ? await resolveTypeId(typeName) : undefined;
 
     const { record, addresses } = await readState(read, id);
     const before = addresses.map(shapeAddress);
@@ -345,10 +357,10 @@ export function createAddressUpdateService({
         notes.push("WARNING: the constituent will still have no current preferred address, so mail and acknowledgement letters may not use this one.");
       }
       payload = { street: fields.street, city: fields.city, state: fields.state, postal_code: fields.postal_code,
-        street_address_type_id: typeId ?? 1, is_preferred: preferred, not_current: false };
+        street_address_type_id: typeId, is_preferred: preferred, not_current: false };
       method = "post";
       // A new address must come back with nothing set beyond what was sent.
-      target = { id: "new", ...payload, street_type_name: fields.address_type ?? "Home",
+      target = { id: "new", ...payload, street_type_name: typeName,
         country: null, county: null, seasonal: false };
       expected = addresses.map(a => preferred && a.is_preferred ? { ...a, is_preferred: false } : a);
       if (preferred && addresses.some(a => a.is_preferred)) {
@@ -448,12 +460,16 @@ export function createAddressUpdateService({
     busy.add(plan.id);
     plans.delete(token);
     try {
+      // Room for the stale-check reads and the write, so the limiter does not
+      // hold the write after the check has passed.
+      await capacity(4);
       const current = await readState(read, plan.id);
       if (fingerprint(current) !== plan.fingerprint) {
         fail("The constituent or its addresses changed since the preview. No update was sent. Prepare a fresh preview for review.");
       }
-      if (plan.method === "post") await post(plan.id, plan.payload);
-      else await patch(plan.addressId, plan.payload);
+      const notAfter = Date.now() + WRITE_WINDOW_MS;
+      if (plan.method === "post") await post(plan.id, plan.payload, { notAfter });
+      else await patch(plan.addressId, plan.payload, { notAfter });
 
       let saved;
       try { saved = await readState(read, plan.id); }

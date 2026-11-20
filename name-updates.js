@@ -1,7 +1,7 @@
 // The only write transport in this project: one name-only PATCH to an
 // existing constituent. No generic write method, create, delete, or retries.
 import { createHash, randomBytes } from "node:crypto";
-import { request, throttle, authenticatedHeaders, LglError } from "./lgl.js";
+import { request, throttle, waitForCapacity, authenticatedHeaders, LglError } from "./lgl.js";
 import { constituentLocks } from "./locks.js";
 
 export const NAME_FIELDS = Object.freeze([
@@ -73,10 +73,17 @@ function assertRecord(record, id) {
 }
 
 /** Internal, fixed-endpoint transport; exported for offline safety tests. */
-export async function patchConstituentName(idValue, payload) {
+// How long a write may follow its stale check; see address-updates.js.
+export const WRITE_WINDOW_MS = 5000;
+
+export async function patchConstituentName(idValue, payload, { notAfter } = {}) {
   const id = constituentId(idValue);
   const body = validateChanges(payload, { trim: false });
+  if (!Number.isFinite(notAfter)) fail("Every name write needs a deadline from its stale check.");
   await throttle();
+  if (Date.now() > notAfter) {
+    fail("The name update was not sent: the rate-limit wait outlasted the stale check. Prepare a fresh preview.");
+  }
   const headers = { ...authenticatedHeaders(), "Content-Type": "application/json" };
   let response;
   try {
@@ -102,7 +109,9 @@ export async function patchConstituentName(idValue, payload) {
 }
 
 /** Each service owns one-use previews and per-constituent write locks. */
-export function createNameUpdateService({ read = request, patch = patchConstituentName, locks = constituentLocks } = {}) {
+export function createNameUpdateService({
+  read = request, patch = patchConstituentName, locks = constituentLocks, capacity = waitForCapacity,
+} = {}) {
   const plans = new Map();
   const busy = locks;
 
@@ -171,12 +180,13 @@ export function createNameUpdateService({ read = request, patch = patchConstitue
     busy.add(plan.id);
     plans.delete(token);
     try {
+      await capacity(2);
       const current = await read(`/constituents/${plan.id}`);
       assertRecord(current, plan.id);
       if (fingerprint(current) !== plan.fingerprint) {
         fail("The constituent changed since the preview. No update was sent. Prepare a fresh preview for review.");
       }
-      await patch(plan.id, plan.payload);
+      await patch(plan.id, plan.payload, { notAfter: Date.now() + WRITE_WINDOW_MS });
       let saved;
       let actual;
       try {

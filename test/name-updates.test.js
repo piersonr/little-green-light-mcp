@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createNameUpdateService, patchConstituentName } from "../name-updates.js";
+import { WRITE_WINDOW_MS, createNameUpdateService, patchConstituentName } from "../name-updates.js";
 
 // Never load real credentials or send network traffic in this suite.
 process.env.LGL_API_KEY = "offline-test-key";
@@ -15,15 +15,17 @@ const base = () => ({
 
 function fixture(initial = base(), transform = record => record) {
   let record = structuredClone(initial);
-  const reads = [], writes = [];
+  const reads = [], writes = [], events = [];
   const service = createNameUpdateService({
-    read: async path => { reads.push(path); return structuredClone(record); },
-    patch: async (id, payload) => {
+    capacity: async n => { events.push(`capacity ${n}`); },
+    read: async path => { reads.push(path); events.push(`read ${path}`); return structuredClone(record); },
+    patch: async (id, payload, options) => {
+      events.push({ write: "PATCH", notAfter: options?.notAfter });
       writes.push({ id, payload: structuredClone(payload) });
       record = transform({ ...record, ...payload, updated_at: "after" });
     },
   });
-  return { ...service, reads, writes, change: updates => Object.assign(record, updates) };
+  return { ...service, reads, writes, events, change: updates => Object.assign(record, updates) };
 }
 const prepare = service => service.preview({ id: 42, changes: { addressee: "Alex & Pat Example" } });
 const apply = (service, preview) => service.apply({ confirmation_token: preview.confirmation_token, confirmed: true });
@@ -201,7 +203,9 @@ test("fixed PATCH transport sends only allowed fields and retains existing name 
     assert.deepEqual(JSON.parse(options.body), { first_name: " Alex ", last_name: "Example", addressee: "Alex & Pat Example" });
     return { ok: true };
   };
-  await patchConstituentName(42, { first_name: " Alex ", last_name: "Example", addressee: "Alex & Pat Example" });
+  await patchConstituentName(42, { first_name: " Alex ", last_name: "Example", addressee: "Alex & Pat Example" }, { notAfter: Date.now() + 60000 });
+  await assert.rejects(patchConstituentName(42, { first_name: "Pat" }), /deadline/);
+  await assert.rejects(patchConstituentName(42, { first_name: "Pat" }, { notAfter: Date.now() - 1 }), /not sent.*fresh preview/);
   await assert.rejects(patchConstituentName(42, { email_addresses: [] }), /outside/);
   await assert.rejects(patchConstituentName("42/gifts", { first_name: "Pat" }), /exact/);
   assert.equal(calls, 1);
@@ -215,7 +219,7 @@ test("write failures never retry, broaden payloads, or expose private response d
       if (status === "network") throw new Error("private-secret-payload");
       return { ok: false, status, text: async () => "private-secret-payload" };
     };
-    await assert.rejects(patchConstituentName(42, { first_name: "Pat" }), error => {
+    await assert.rejects(patchConstituentName(42, { first_name: "Pat" }, { notAfter: Date.now() + 60000 }), error => {
       assert.equal(error.message.includes("private-secret-payload"), false);
       assert.match(error.message, /retry|retried/);
       return true;
@@ -314,4 +318,15 @@ test("the shared lock blocks a name write during an address write and is release
   // After it finishes, a fresh name update proceeds.
   assert.equal((await apply(names, await prepare(names))).verified, true);
   assert.equal(nameWrites, 1);
+});
+
+test("apply waits for rate-limit room before its stale check and writes under a short deadline", async () => {
+  const service = fixture();
+  const preview = await prepare(service);
+  service.events.length = 0;
+  const started = Date.now();
+  assert.equal((await apply(service, preview)).verified, true);
+  assert.deepEqual(service.events.slice(0, 2), ["capacity 2", "read /constituents/42"]);
+  const { notAfter } = service.events[2];
+  assert.ok(notAfter >= started + WRITE_WINDOW_MS && notAfter <= Date.now() + WRITE_WINDOW_MS);
 });
