@@ -483,3 +483,13 @@ test("time spent in the stale-check reads counts against the write deadline", as
     Date.now = realNow;
   }
 });
+
+test("a city after a comma is caught however the comma is spaced", async () => {
+  for (const street of ["1 Main St,Moraga", "1 Main St ,  Moraga", "1 Main St,moraga."]) {
+    await assert.rejects(fixture([]).preview({ id: 42, action: "add", address: { ...NEW, street } }), /city, state or ZIP/, street);
+  }
+  const service = fixture([addr(1, { is_preferred: true }), addr(2, { street: "2 Old Rd,Moraga" })]);
+  await assert.rejects(service.preview({ id: 42, action: "mark_inactive", address_id: 2 }), /not split/);
+  await assert.rejects(service.preview({ id: 42, action: "update", address_id: 2, address: { address_type: "Work" } }), /not split/);
+  assert.equal(service.writes.length, 0);
+});

@@ -113,7 +113,8 @@ function looksCombined(street, city) {
   if (rest === "calif" || rest.endsWith(" calif")) return true;
   for (const name of STATE_NAMES) if (rest === name || rest.endsWith(` ${name}`)) return true;
   const c = typeof city === "string" ? city.trim().toLowerCase() : "";
-  return Boolean(c) && last.toLowerCase().endsWith(`, ${c}`);
+  // The last comma segment, however it is spaced, naming the city.
+  return Boolean(c) && (tail.toLowerCase() === c || rest === c);
 }
 
 /** Validate and normalize the address fields supplied by the caller. */
