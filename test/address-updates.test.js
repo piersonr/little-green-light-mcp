@@ -177,6 +177,9 @@ test("bad input is rejected before any read or write", async () => {
     { id: 42, action: "add", address: { ...NEW, street: "1 A St, Washington, District of Columbia" } },
     { id: 42, action: "add", address: { ...NEW, street: "1 A St, Moraga, Calif." } },
     { id: 42, action: "add", address: { ...NEW, street: "1 A St, Moraga, CA94556" } },
+    { id: 42, action: "add", address: { ...NEW, street: "1 A St, Moraga ca 94556" } },
+    { id: 42, action: "add", address: { ...NEW, street: "1 A St Moraga CA 94556" } },
+    { id: 42, action: "add", address: { ...NEW, street: "1 A St Albany New York 12207" } },
     { id: 42, action: "add", address: { ...NEW, country: "US" } },
     { id: 42, action: "add", address: { ...NEW, address_type: "Vacation" } },
     { id: 42, action: "add", address: { ...NEW, street: "1 A St\u0000" } },
@@ -320,7 +323,8 @@ test("single-line guard still allows ordinary multi-part streets", async () => {
   const service = fixture([]);
   for (const street of ["PO Box 94556", "1148 Alpine Road, Suite 100", "12 Main St\nApt 4B", "1 Ca Ave",
     "1200 Maryland Ave, NE", "400 Main St, Ste 10200", "5 Washington St", "10 Main St, Unit B",
-    "1 Market St, Ground Fl", "1 Main St, Upper Fl", "1 A St, Unit Pa", "1 A St, Building In"]) {
+    "1 Market St, Ground Fl", "1 Main St, Upper Fl", "1 A St, Unit Pa", "1 A St, Building In",
+    "Apt B 94556", "1 Ca Ave Unit 12345"]) {
     const preview = await service.preview({ id: 42, action: "add", address: { ...NEW, street } });
     assert.equal(preview.status, "preview", street);
   }

@@ -83,7 +83,16 @@ function text(field, value, { max = 250, multiline = false } = {}) {
 function looksCombined(street, city) {
   const last = street.split("\n").pop().trim();
   const parts = last.split(",").map(part => part.trim());
-  if (parts.length < 2) return false;
+  if (parts.length < 2) {
+    // No comma: only a state code or name directly before a ZIP gives it away
+    // ("1 A St Moraga CA 94556"); "PO Box 94556" and "Apt B 94556" pass.
+    const m = last.match(/^(.*\S)\s+\d{5}(-\d{4})?$/);
+    if (!m) return false;
+    const before = m[1].replace(/\.$/, "").toLowerCase();
+    const word = before.split(/\s+/).pop();
+    return (word.length === 2 && STATE_SET.has(word.toUpperCase())) ||
+      [...STATE_NAMES].some(name => before.endsWith(` ${name}`));
+  }
   const tail = parts.at(-1);
   // "1200 Maryland Ave, NE": a quadrant straight after the street, not a
   // state after a city ("1 Main St, Lincoln, NE" has a city segment first).
@@ -91,13 +100,16 @@ function looksCombined(street, city) {
   if (/^\d{5}(-\d{4})?$/.test(tail)) return true;
   // Drop a trailing ZIP and period, then look for a state code or a whole
   // state name at the end: ", CA", ", Moraga CA 94556", ", Albany New York".
+  const hasZip = /\d{5}(-\d{4})?$/.test(tail);
   const kept = tail.replace(/\s*\d{5}(-\d{4})?$/, "").replace(/\.$/, "").trim();
   const rest = kept.toLowerCase();
   const words = kept.split(/\s+/);
   const code = words.at(-1) ?? "";
-  // A bare ", ca" counts; after other words ("Ground Fl", "Unit Pa") only an
-  // upper-case code does, so floor and unit lines are not read as states.
-  if (code.length === 2 && STATE_SET.has(code.toUpperCase()) && (words.length === 1 || code === code.toUpperCase())) return true;
+  // A bare ", ca" or a code before a ZIP counts in any case; otherwise, after
+  // other words ("Ground Fl", "Unit Pa"), only an upper-case code does, so
+  // floor and unit lines are not read as states.
+  if (code.length === 2 && STATE_SET.has(code.toUpperCase()) &&
+      (words.length === 1 || hasZip || code === code.toUpperCase())) return true;
   if (rest === "calif" || rest.endsWith(" calif")) return true;
   for (const name of STATE_NAMES) if (rest === name || rest.endsWith(` ${name}`)) return true;
   const c = typeof city === "string" ? city.trim().toLowerCase() : "";
