@@ -511,7 +511,10 @@ export function createAddressUpdateService({
       }
       const profileKeys = [...new Set([...Object.keys(current.record), ...Object.keys(saved.record)])]
         .filter(k => !DERIVED_PROFILE_FIELDS.has(k));
-      const profileChanged = profileKeys.filter(k => !same(current.record[k], saved.record[k]));
+      // A field present before the write must still be present: an omitted
+      // field is not evidence that it is unchanged.
+      const profileChanged = profileKeys.filter(k =>
+        (Object.hasOwn(current.record, k) && !Object.hasOwn(saved.record, k)) || !same(current.record[k], saved.record[k]));
       if (profileChanged.length) problems.push({ issue: "constituent profile fields changed unexpectedly", fields: profileChanged });
 
       const verified = problems.length === 0;

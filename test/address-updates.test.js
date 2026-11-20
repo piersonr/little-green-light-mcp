@@ -493,3 +493,16 @@ test("a city after a comma is caught however the comma is spaced", async () => {
   await assert.rejects(service.preview({ id: 42, action: "update", address_id: 2, address: { address_type: "Work" } }), /not split/);
   assert.equal(service.writes.length, 0);
 });
+
+test("a profile field missing from the saved record fails verification", async () => {
+  const service = fixture([addr(1, { is_preferred: true }), addr(2)], { misbehave: state => {
+    const { middle_name, ...rest } = state.record;
+    return { ...state, record: rest };
+  } });
+  // An empty field: comparing values alone cannot tell it from a missing one.
+  service.mutate(state => { state.record.middle_name = ""; });
+  const preview = await service.preview({ id: 42, action: "mark_inactive", address_id: 2 });
+  const result = await apply(service, preview);
+  assert.equal(result.verified, false);
+  assert.match(JSON.stringify(result.problems), /profile fields changed unexpectedly.*middle_name/);
+});
