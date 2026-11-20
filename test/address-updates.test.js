@@ -114,6 +114,7 @@ test("update: make_preferred moves the preferred flag and is verified", async ()
   const preview = await service.preview({ id: 42, action: "update", address_id: 2, make_preferred: true });
   assert.deepEqual(preview.request.body, { street: "2 Old Rd", city: "Moraga", state: "CA",
     postal_code: "94556", street_address_type_id: 1, is_preferred: true, not_current: false });
+  assert.equal(preview.addresses_after.find(a => a.id === 2).address_type, "Home");
   assert.equal((await apply(service, preview)).verified, true);
 });
 
@@ -123,6 +124,7 @@ test("mark_inactive: sends not_current with both flags explicit and verifies", a
   assert.deepEqual(preview.request.body, { street: "2 Old Rd", city: "Moraga", state: "CA",
     postal_code: "94556", street_address_type_id: 1, is_preferred: false, not_current: true });
   assert.equal(preview.addresses_after.find(a => a.id === 2).not_current, true);
+  assert.equal(preview.addresses_after.find(a => a.id === 2).address_type, "Home");
   const result = await apply(service, preview);
   assert.equal(result.verified, true, JSON.stringify(result.problems));
   assert.equal(result.address.not_current, true);

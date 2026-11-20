@@ -391,7 +391,7 @@ export function createAddressUpdateService({
       }
       method = "patch";
       target = { ...current, ...payload,
-        ...(payload.street_address_type_id !== undefined ? { street_type_name: fields.address_type } : {}) };
+        ...(fields.address_type !== undefined ? { street_type_name: fields.address_type } : {}) };
       const demote = payload.is_preferred && !current.is_preferred;
       expected = addresses.map(a => a.id === addressId ? target
         : demote && a.is_preferred ? { ...a, is_preferred: false } : a);
