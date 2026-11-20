@@ -82,15 +82,24 @@ function text(field, value, { max = 250, multiline = false } = {}) {
 // name with a ZIP, or ", <the city being entered>".
 function looksCombined(street, city) {
   const last = street.split("\n").pop().trim();
-  // ", NE" etc. after a street is a DC-style quadrant, not Nebraska.
-  const tail = last.match(/,\s*([^,]+)$/)?.[1]?.trim() ?? "";
-  if (/^(NE|NW|SE|SW)$/i.test(tail)) return false;
-  const isState = word => STATE_SET.has(word.toUpperCase()) || STATE_NAMES.has(word.toLowerCase());
-  const zip = "(\\s+\\d{5}(-\\d{4})?)?";
-  // ", CA" / ", CA 94556" / ", California 94556" / ", Moraga CA 94556"
-  const m = tail.match(new RegExp(`^(?:[A-Za-z .'-]+\\s+)?([A-Za-z][A-Za-z .]*?)\\.?${zip}$`));
-  if (m && isState(m[1].trim())) return true;
+  const parts = last.split(",").map(part => part.trim());
+  if (parts.length < 2) return false;
+  const tail = parts.at(-1);
+  // "1200 Maryland Ave, NE": a quadrant straight after the street, not a
+  // state after a city ("1 Main St, Lincoln, NE" has a city segment first).
+  if (parts.length === 2 && /^(NE|NW|SE|SW)$/i.test(tail)) return false;
   if (/^\d{5}(-\d{4})?$/.test(tail)) return true;
+  // Drop a trailing ZIP and period, then look for a state code or a whole
+  // state name at the end: ", CA", ", Moraga CA 94556", ", Albany New York".
+  const kept = tail.replace(/\s*\d{5}(-\d{4})?$/, "").replace(/\.$/, "").trim();
+  const rest = kept.toLowerCase();
+  const words = kept.split(/\s+/);
+  const code = words.at(-1) ?? "";
+  // A bare ", ca" counts; after other words ("Ground Fl", "Unit Pa") only an
+  // upper-case code does, so floor and unit lines are not read as states.
+  if (code.length === 2 && STATE_SET.has(code.toUpperCase()) && (words.length === 1 || code === code.toUpperCase())) return true;
+  if (rest === "calif" || rest.endsWith(" calif")) return true;
+  for (const name of STATE_NAMES) if (rest === name || rest.endsWith(` ${name}`)) return true;
   const c = typeof city === "string" ? city.trim().toLowerCase() : "";
   return Boolean(c) && last.toLowerCase().endsWith(`, ${c}`);
 }
