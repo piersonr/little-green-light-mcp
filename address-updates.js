@@ -46,6 +46,13 @@ export const US_STATES = Object.freeze([
   "VT", "VA", "WA", "WV", "WI", "WY", "PR", "VI", "GU", "AS", "MP", "AA", "AE", "AP",
 ]);
 const STATE_SET = new Set(US_STATES);
+const STATE_NAMES = new Set(["alabama", "alaska", "arizona", "arkansas", "california", "colorado",
+  "connecticut", "delaware", "district of columbia", "florida", "georgia", "hawaii", "idaho", "illinois",
+  "indiana", "iowa", "kansas", "kentucky", "louisiana", "maine", "maryland", "massachusetts", "michigan",
+  "minnesota", "mississippi", "missouri", "montana", "nebraska", "nevada", "new hampshire", "new jersey",
+  "new mexico", "new york", "north carolina", "north dakota", "ohio", "oklahoma", "oregon",
+  "pennsylvania", "rhode island", "south carolina", "south dakota", "tennessee", "texas", "utah",
+  "vermont", "virginia", "washington", "west virginia", "wisconsin", "wyoming", "puerto rico"]);
 const ZIP_RE = /^\d{5}(-\d{4})?$/;
 export const ACTIONS = Object.freeze(["add", "update", "mark_inactive"]);
 export const ADDRESS_TYPES = Object.freeze(["Home", "Work", "Other", "School"]);
@@ -75,10 +82,15 @@ function text(field, value, { max = 250, multiline = false } = {}) {
 // name with a ZIP, or ", <the city being entered>".
 function looksCombined(street, city) {
   const last = street.split("\n").pop().trim();
-  const state = last.match(/,\s*([A-Za-z]{2})\.?(\s+\d{5}(-\d{4})?)?$/);
-  if (state && STATE_SET.has(state[1].toUpperCase())) return true;
-  if (/,\s*\d{5}(-\d{4})?$/.test(last)) return true;
-  if (/,\s*[A-Za-z][A-Za-z ]+\s+\d{5}(-\d{4})?$/.test(last)) return true;
+  // ", NE" etc. after a street is a DC-style quadrant, not Nebraska.
+  const tail = last.match(/,\s*([^,]+)$/)?.[1]?.trim() ?? "";
+  if (/^(NE|NW|SE|SW)$/i.test(tail)) return false;
+  const isState = word => STATE_SET.has(word.toUpperCase()) || STATE_NAMES.has(word.toLowerCase());
+  const zip = "(\\s+\\d{5}(-\\d{4})?)?";
+  // ", CA" / ", CA 94556" / ", California 94556" / ", Moraga CA 94556"
+  const m = tail.match(new RegExp(`^(?:[A-Za-z .'-]+\\s+)?([A-Za-z][A-Za-z .]*?)\\.?${zip}$`));
+  if (m && isState(m[1].trim())) return true;
+  if (/^\d{5}(-\d{4})?$/.test(tail)) return true;
   const c = typeof city === "string" ? city.trim().toLowerCase() : "";
   return Boolean(c) && last.toLowerCase().endsWith(`, ${c}`);
 }
@@ -308,6 +320,9 @@ export function createAddressUpdateService({
       if (args.make_preferred === undefined && preferred) {
         notes.push("The constituent has no current preferred address, so this one will be preferred.");
       }
+      if (!preferred && !hasCurrentPreferred) {
+        notes.push("WARNING: the constituent will still have no current preferred address, so mail and acknowledgement letters may not use this one.");
+      }
       payload = { street: fields.street, city: fields.city, state: fields.state, postal_code: fields.postal_code,
         street_address_type_id: typeId ?? 1, is_preferred: preferred, not_current: false };
       method = "post";
@@ -337,6 +352,9 @@ export function createAddressUpdateService({
         if (current.not_current && args.make_preferred === true) {
           fail("That address is marked not current and cannot be made preferred.");
         }
+        if (fields.street !== undefined && fields.city === undefined && looksCombined(fields.street, current.city ?? "")) {
+          fail("street appears to include the city, state or ZIP. Put city, state and postal_code in their own fields.");
+        }
         const changed = {};
         for (const key of ["street", "city", "state", "postal_code"]) {
           if (fields[key] !== undefined && fields[key] !== current[key]) changed[key] = fields[key];
@@ -361,6 +379,9 @@ export function createAddressUpdateService({
       }
     }
 
+    if (method === "patch" && looksCombined(String(target.street ?? ""), target.city)) {
+      notes.push("This address's street still holds city, state or ZIP text. It is re-sent unchanged so LGL cannot reset it; split it with an update if the address stays in use.");
+    }
     const after = (method === "post" ? [...expected, target] : expected).map(shapeAddress);
 
     if (plans.size >= 100) fail("Too many unused previews in this server session. Restart the MCP server to clear them.");
@@ -386,7 +407,9 @@ export function createAddressUpdateService({
   function compareAddress(actual, wanted, skip = []) {
     const keys = [...new Set([...Object.keys(wanted), ...Object.keys(actual)])]
       .filter(k => k !== "id" && !DERIVED_ADDRESS_FIELDS.has(k) && !skip.includes(k));
-    return keys.filter(k => !same(actual[k], wanted[k]));
+    // A field the expectation names must be present in the saved address:
+    // an omitted field is not evidence that it is empty.
+    return keys.filter(k => (Object.hasOwn(wanted, k) && !Object.hasOwn(actual, k)) || !same(actual[k], wanted[k]));
   }
 
   async function apply({ confirmation_token: token, confirmed } = {}) {

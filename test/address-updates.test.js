@@ -167,6 +167,8 @@ test("bad input is rejected before any read or write", async () => {
     { id: 42, action: "add", address: { ...NEW, street: "1 A St, California 94556" } },
     { id: 42, action: "add", address: { ...NEW, street: "1 A St\nMoraga, CA. 94556" } },
     { id: 42, action: "add", address: { ...NEW, street: "1 A St, 94556" } },
+    { id: 42, action: "add", address: { ...NEW, street: "1 A St, Moraga CA" } },
+    { id: 42, action: "add", address: { ...NEW, street: "1 A St, Moraga, California" } },
     { id: 42, action: "add", address: { ...NEW, country: "US" } },
     { id: 42, action: "add", address: { ...NEW, address_type: "Vacation" } },
     { id: 42, action: "add", address: { ...NEW, street: "1 A St\u0000" } },
@@ -308,7 +310,8 @@ test("write transport failures never retry or leak response bodies", async () =>
 
 test("single-line guard still allows ordinary multi-part streets", async () => {
   const service = fixture([]);
-  for (const street of ["PO Box 94556", "1148 Alpine Road, Suite 100", "12 Main St\nApt 4B", "1 Ca Ave"]) {
+  for (const street of ["PO Box 94556", "1148 Alpine Road, Suite 100", "12 Main St\nApt 4B", "1 Ca Ave",
+    "1200 Maryland Ave, NE", "400 Main St, Ste 10200", "5 Washington St", "10 Main St, Unit B"]) {
     const preview = await service.preview({ id: 42, action: "add", address: { ...NEW, street } });
     assert.equal(preview.status, "preview", street);
   }
@@ -340,6 +343,7 @@ test("a new address defaults to preferred when no current preferred address exis
   assert.equal((await apply(service, preview)).verified, true);
   const optOut = await fixture([addr(1, { not_current: true })]).preview({ id: 42, action: "add", address: NEW, make_preferred: false });
   assert.equal(optOut.request.body.is_preferred, false);
+  assert.match(optOut.notes.join(" "), /WARNING: .*no current preferred/);
   const normal = await fixture().preview({ id: 42, action: "add", address: NEW });
   assert.equal(normal.request.body.is_preferred, false);
 });
@@ -374,4 +378,29 @@ test("verification checks every saved field on the target, including defaults on
   // null and "" are the same empty value in LGL (country is "" on some records).
   const blank = fixture(undefined, { misbehave: s => { s.addresses.at(-1).country = ""; return s; } });
   assert.equal((await apply(blank, await blank.preview({ id: 42, action: "add", address: NEW }))).verified, true);
+});
+
+test("verification refuses a saved address that omits a field it should have", async () => {
+  for (const [args, drop] of [
+    [{ id: 42, action: "add", address: NEW }, "country"],
+    [{ id: 42, action: "add", address: NEW }, "county"],
+    [{ id: 42, action: "update", address_id: 2, address: { city: "Orinda" } }, "county"],
+  ]) {
+    const service = fixture(undefined, { misbehave: s => {
+      const target = args.action === "add" ? s.addresses.at(-1) : s.addresses.find(a => a.id === 2);
+      delete target[drop];
+      return s;
+    } });
+    const result = await apply(service, await service.preview(args));
+    assert.equal(result.verified, false, drop);
+    assert.ok(result.problems.some(p => p.fields?.includes(drop)), JSON.stringify(result.problems));
+  }
+});
+
+test("a new street is checked against the saved city; an old single-line street is flagged, not blocked", async () => {
+  const service = fixture([addr(1, { is_preferred: true }), addr(2, { street: "2 Old Rd, Moraga, CA 94556" })]);
+  await assert.rejects(service.preview({ id: 42, action: "update", address_id: 1, address: { street: "9 New Rd, Moraga" } }), /city, state or ZIP/);
+  const preview = await service.preview({ id: 42, action: "mark_inactive", address_id: 2 });
+  assert.equal(preview.status, "preview");
+  assert.match(preview.notes.join(" "), /still holds city, state or ZIP/);
 });

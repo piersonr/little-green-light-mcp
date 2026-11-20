@@ -281,3 +281,37 @@ test("name and address writes share one per-constituent lock", async () => {
   assert.equal((await running).verified, true);
   assert.equal(addressWrites, 0);
 });
+
+test("the shared lock blocks a name write during an address write and is released after a failed apply", async () => {
+  const { createAddressUpdateService } = await import("../address-updates.js");
+  let finish;
+  const wait = new Promise(resolve => { finish = resolve; });
+  const record = base();
+  const addresses = [{ id: 7, street: "1 A St", city: "Moraga", state: "CA", postal_code: "94556",
+    street_address_type_id: 1, is_preferred: false, not_current: false }];
+  const read = async path => path.endsWith("street_addresses")
+    ? { total_items: 1, items: structuredClone(addresses) } : structuredClone(record);
+  let nameWrites = 0, failNext = true;
+  const names = createNameUpdateService({ read, patch: async (_id, payload) => { nameWrites++; Object.assign(record, payload); } });
+  const places = createAddressUpdateService({ read, patch: async (_id, body) => {
+    if (failNext) { failNext = false; throw new Error("Write failed"); }
+    await wait; Object.assign(addresses[0], body);
+  } });
+
+  // A failed address apply releases the lock.
+  const failing = await places.preview({ id: 42, action: "mark_inactive", address_id: 7 });
+  await assert.rejects(places.apply({ confirmation_token: failing.confirmation_token, confirmed: true }), /Write failed/);
+
+  // While an address apply is in flight, a name apply is refused.
+  const addressPreview = await places.preview({ id: 42, action: "mark_inactive", address_id: 7 });
+  const namePreview = await prepare(names);
+  const running = places.apply({ confirmation_token: addressPreview.confirmation_token, confirmed: true });
+  await assert.rejects(apply(names, namePreview), /running/);
+  finish();
+  assert.equal((await running).verified, true);
+  assert.equal(nameWrites, 0);
+
+  // After it finishes, a fresh name update proceeds.
+  assert.equal((await apply(names, await prepare(names))).verified, true);
+  assert.equal(nameWrites, 1);
+});

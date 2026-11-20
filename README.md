@@ -126,7 +126,13 @@ Rules built in because of LGL behavior seen in the October 2026 cleanup (AGENTS.
 - A new address is made preferred by default when the constituent has no current
   preferred address; pass `make_preferred: false` to override.
 - Input is validated: two-letter US state or territory codes, ZIP or ZIP+4, a
-  non-empty street, and no city, state or ZIP packed onto the end of `street`. Only US addresses
+  non-empty street, and no city, state or ZIP packed onto the end of `street`
+  (checked against the saved city when an update changes only the street). An
+  existing single-line street is re-sent unchanged on a PATCH, with a note in the
+  preview, so junk addresses can still be marked inactive.
+- Verification requires every field it checks to be present in LGL's response; a
+  missing field is reported, not assumed empty. Empty string and null count as
+  the same empty value. Only US addresses
   can be edited, and a new address cannot duplicate an active one.
 
 Address updates are tested offline with a simulated LGL and a stdio MCP exchange.
