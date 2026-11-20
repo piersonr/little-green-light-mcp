@@ -81,8 +81,9 @@ check on apply, exactly one write with no retries, then a re-read that verifies 
 result.
 
 Both writers wait for room under the rate limit before the stale check, and a
-write must start within 5 seconds of that check. If the rate limiter would hold
-it longer, nothing is sent and a fresh preview is needed. The writes are not
+write must start within 10 seconds of the moment that check began, so slow
+stale-check reads count against the limit too. If the write cannot start in
+time, nothing is sent and a fresh preview is needed. The writes are not
 conditional, so a change made by staff in those few seconds is not
 detected. A new address with no `address_type` uses the id LGL lists for Home.
 

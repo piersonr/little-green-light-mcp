@@ -15,17 +15,17 @@ const base = () => ({
 
 function fixture(initial = base(), transform = record => record) {
   let record = structuredClone(initial);
-  const reads = [], writes = [], events = [];
+  const reads = [], writes = [], events = [], readTimes = [];
   const service = createNameUpdateService({
     capacity: async n => { events.push(`capacity ${n}`); },
-    read: async path => { reads.push(path); events.push(`read ${path}`); return structuredClone(record); },
+    read: async path => { reads.push(path); events.push(`read ${path}`); readTimes.push(Date.now()); return structuredClone(record); },
     patch: async (id, payload, options) => {
       events.push({ write: "PATCH", notAfter: options?.notAfter });
       writes.push({ id, payload: structuredClone(payload) });
       record = transform({ ...record, ...payload, updated_at: "after" });
     },
   });
-  return { ...service, reads, writes, events, change: updates => Object.assign(record, updates) };
+  return { ...service, reads, writes, events, readTimes, change: updates => Object.assign(record, updates) };
 }
 const prepare = service => service.preview({ id: 42, changes: { addressee: "Alex & Pat Example" } });
 const apply = (service, preview) => service.apply({ confirmation_token: preview.confirmation_token, confirmed: true });
@@ -328,5 +328,6 @@ test("apply waits for rate-limit room before its stale check and writes under a 
   assert.equal((await apply(service, preview)).verified, true);
   assert.deepEqual(service.events.slice(0, 2), ["capacity 2", "read /constituents/42"]);
   const { notAfter } = service.events[2];
-  assert.ok(notAfter >= started + WRITE_WINDOW_MS && notAfter <= Date.now() + WRITE_WINDOW_MS);
+  const readStart = service.readTimes.find(t => t >= started);
+  assert.ok(notAfter >= started + WRITE_WINDOW_MS && notAfter <= readStart + WRITE_WINDOW_MS, `${notAfter} vs ${readStart}`);
 });

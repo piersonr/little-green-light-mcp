@@ -73,8 +73,8 @@ function assertRecord(record, id) {
 }
 
 /** Internal, fixed-endpoint transport; exported for offline safety tests. */
-// How long a write may follow its stale check; see address-updates.js.
-export const WRITE_WINDOW_MS = 5000;
+// How long a write may start after its stale check began; see address-updates.js.
+export const WRITE_WINDOW_MS = 10000;
 
 export async function patchConstituentName(idValue, payload, { notAfter } = {}) {
   const id = constituentId(idValue);
@@ -181,12 +181,13 @@ export function createNameUpdateService({
     plans.delete(token);
     try {
       await capacity(2);
+      const notAfter = Date.now() + WRITE_WINDOW_MS;
       const current = await read(`/constituents/${plan.id}`);
       assertRecord(current, plan.id);
       if (fingerprint(current) !== plan.fingerprint) {
         fail("The constituent changed since the preview. No update was sent. Prepare a fresh preview for review.");
       }
-      await patch(plan.id, plan.payload, { notAfter: Date.now() + WRITE_WINDOW_MS });
+      await patch(plan.id, plan.payload, { notAfter });
       let saved;
       let actual;
       try {

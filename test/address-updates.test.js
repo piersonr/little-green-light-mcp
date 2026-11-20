@@ -27,7 +27,7 @@ const TYPES = { items: [{ id: 1, name: "Home" }, { id: 2, name: "Work" }, { id: 
 function fixture(addresses = [addr(1, { is_preferred: true }), addr(2)], { misbehave = s => s, failWrite, resetOmitted = false, types = TYPES } = {}) {
   let state = { record: profile(), addresses: structuredClone(addresses) };
   let nextId = 100;
-  const reads = [], writes = [], events = [];
+  const reads = [], writes = [], events = [], readTimes = [];
   const commit = (changedId, preferred) => {
     if (preferred) state.addresses.forEach(a => { if (a.id !== changedId) a.is_preferred = false; });
     state.record.updated_at = "after";
@@ -38,6 +38,7 @@ function fixture(addresses = [addr(1, { is_preferred: true }), addr(2)], { misbe
     read: async (path, params) => {
       reads.push(path);
       events.push(`read ${path}`);
+      readTimes.push(Date.now());
       if (path === "/types/street_address_types") return types;
       if (path === "/constituents/42") return { ...structuredClone(state.record), street_addresses: structuredClone(state.addresses) };
       if (path === "/constituents/42/street_addresses") {
@@ -47,7 +48,7 @@ function fixture(addresses = [addr(1, { is_preferred: true }), addr(2)], { misbe
       throw new Error(`unexpected read ${path}`);
     },
     post: async (id, body, options) => {
-      events.push({ write: "POST", notAfter: options?.notAfter });
+      events.push({ write: "POST", notAfter: options?.notAfter, at: Date.now() });
       writes.push({ method: "POST", id, body: structuredClone(body) });
       if (failWrite) throw failWrite;
       const created = addr(nextId++, { ...body, street_type_name: types.items.find(t => t.id === body.street_address_type_id).name });
@@ -55,7 +56,7 @@ function fixture(addresses = [addr(1, { is_preferred: true }), addr(2)], { misbe
       commit(created.id, body.is_preferred);
     },
     patch: async (id, body, options) => {
-      events.push({ write: "PATCH", notAfter: options?.notAfter });
+      events.push({ write: "PATCH", notAfter: options?.notAfter, at: Date.now() });
       writes.push({ method: "PATCH", id, body: structuredClone(body) });
       if (failWrite) throw failWrite;
       const a = state.addresses.find(x => x.id === id);
@@ -69,7 +70,7 @@ function fixture(addresses = [addr(1, { is_preferred: true }), addr(2)], { misbe
       commit(id, body.is_preferred);
     },
   });
-  return { ...service, reads, writes, events, mutate: fn => { fn(state); } };
+  return { ...service, reads, writes, events, readTimes, mutate: fn => { fn(state); } };
 }
 const apply = (service, preview) => service.apply({ confirmation_token: preview.confirmation_token, confirmed: true });
 const NEW = { street: "12 Example Way", city: "Moraga", state: "ca", postal_code: "94556-1234" };
@@ -449,7 +450,8 @@ test("apply waits for rate-limit room before its stale check and writes under a 
   const writeAt = service.events.findIndex(e => typeof e === "object");
   assert.ok(service.events.slice(1, writeAt).every(e => e.startsWith("read ")), JSON.stringify(service.events));
   const { notAfter } = service.events[writeAt];
-  assert.ok(notAfter >= started + WRITE_WINDOW_MS && notAfter <= Date.now() + WRITE_WINDOW_MS);
+  const readStart = service.readTimes.find(t => t >= started);
+  assert.ok(notAfter >= started + WRITE_WINDOW_MS && notAfter <= readStart + WRITE_WINDOW_MS, `${notAfter} vs ${readStart}`);
 });
 
 test("a new address without a type uses LGL's id for Home, not a hard-coded one", async () => {
@@ -461,4 +463,23 @@ test("a new address without a type uses LGL's id for Home, not a hard-coded one"
   assert.equal((await apply(service, preview)).verified, true);
   await assert.rejects(fixture([], { types: { items: [{ id: 7, name: "Work" }] } })
     .preview({ id: 42, action: "add", address: NEW }), /no street address type named 'Home'/);
+});
+
+test("time spent in the stale-check reads counts against the write deadline", async () => {
+  const service = fixture();
+  const preview = await service.preview({ id: 42, action: "mark_inactive", address_id: 2 });
+  const realNow = Date.now;
+  let now = realNow();
+  Date.now = () => now;
+  try {
+    // Each stale-check read takes 6 seconds of fake time: 12 seconds in all.
+    const origPush = service.readTimes.push.bind(service.readTimes);
+    service.readTimes.push = t => { now += 6000; return origPush(t); };
+    await apply(service, preview);
+    const write = service.events.find(e => typeof e === "object" && e.notAfter !== undefined);
+    // A real transport would refuse here; the fake records what it was given.
+    assert.ok(write.notAfter < write.at, "the deadline must start before the reads, so it has passed by write time");
+  } finally {
+    Date.now = realNow;
+  }
 });

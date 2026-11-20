@@ -244,10 +244,11 @@ function checkBody(body, allowed) {
   }
 }
 
-// How long a write may follow its stale check. A write that has to wait
-// longer for the rate limiter is abandoned rather than sent against a state
-// that was checked too long ago.
-export const WRITE_WINDOW_MS = 5000;
+// How long a write may start after its stale check began. The clock starts
+// before the stale-check reads, so a slow or rate-limited read also counts;
+// a write that cannot start in time is abandoned rather than sent against a
+// state that was read too long ago.
+export const WRITE_WINDOW_MS = 10000;
 
 async function send(method, url, body, what, notAfter) {
   if (!Number.isFinite(notAfter)) fail("Every address write needs a deadline from its stale check.");
@@ -463,11 +464,11 @@ export function createAddressUpdateService({
       // Room for the stale-check reads and the write, so the limiter does not
       // hold the write after the check has passed.
       await capacity(4);
+      const notAfter = Date.now() + WRITE_WINDOW_MS;
       const current = await readState(read, plan.id);
       if (fingerprint(current) !== plan.fingerprint) {
         fail("The constituent or its addresses changed since the preview. No update was sent. Prepare a fresh preview for review.");
       }
-      const notAfter = Date.now() + WRITE_WINDOW_MS;
       if (plan.method === "post") await post(plan.id, plan.payload, { notAfter });
       else await patch(plan.addressId, plan.payload, { notAfter });
 
