@@ -1,8 +1,8 @@
 // HTTP client for the Little Green Light REST API.
 //
-// READ-ONLY BY CONSTRUCTION: request() hardcodes method GET and there is no
-// code path here that issues POST/PATCH/PUT/DELETE. Keep it that way — the
-// safety guarantee of this server rests on this file.
+// request() remains GET-only. Authentication and rate limiting are shared
+// with the separate, field-restricted writers in name-updates.js and
+// address-updates.js.
 
 import { readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
@@ -71,13 +71,18 @@ function apiKey() {
   return cachedKey;
 }
 
+/** Internal transport headers. Never return these from an MCP tool. */
+export function authenticatedHeaders() {
+  return { Authorization: `Bearer ${apiKey()}`, Accept: "application/json" };
+}
+
 // --- rate limiting ---------------------------------------------------------
 
 // Sliding window over call timestamps. A single broad question can fan out to
 // dozens of calls, so throttling here beats surfacing 429s to the model.
 const callTimes = [];
 
-async function throttle() {
+export async function throttle() {
   for (;;) {
     const cutoff = Date.now() - RATE_WINDOW_MS;
     while (callTimes.length && callTimes[0] < cutoff) callTimes.shift();
@@ -87,6 +92,20 @@ async function throttle() {
     }
     const waitMs = callTimes[0] - cutoff + 50;
     await sleep(waitMs);
+  }
+}
+
+/**
+ * Wait until at least `n` calls are free in this process's window, without
+ * taking any. Writers call it before their stale check so the rate limiter
+ * does not hold a write after that check has passed.
+ */
+export async function waitForCapacity(n) {
+  for (;;) {
+    const cutoff = Date.now() - RATE_WINDOW_MS;
+    while (callTimes.length && callTimes[0] < cutoff) callTimes.shift();
+    if (callTimes.length <= RATE_LIMIT - n) return;
+    await sleep(callTimes[0] - cutoff + 50);
   }
 }
 

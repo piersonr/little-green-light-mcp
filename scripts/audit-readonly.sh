@@ -1,17 +1,39 @@
 #!/usr/bin/env bash
-# Mechanical guarantee that this server never issues a write request to LGL.
-# Run before every change to index.js/lgl.js. Any match other than this
-# script itself or a comment is a bug.
+# Static guard: only name-updates.js and address-updates.js may write to LGL.
+# Every other source file (recursively, excluding node_modules, test/, .git and
+# .claude worktrees) must
+#  1. not name a write HTTP method,
+#  2. not call fetch() directly (lgl.js, GET-only, is the one exception), and
+#  3. not import the raw write transports, which would skip the preview flow.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-hits=$(grep -rnE "method:\s*[\"'](POST|PATCH|PUT|DELETE)[\"']" --include="*.js" . \
-  | grep -v node_modules || true)
+writers='^\./(name-updates|address-updates)\.js$'
+sources=()
+while IFS= read -r file; do
+  [[ "$file" =~ $writers ]] || sources+=("$file")
+done < <(find . \( -name node_modules -o -name test -o -name .git -o -name .claude \) -prune -o \
+  \( -name '*.js' -o -name '*.mjs' -o -name '*.cjs' \) -type f -print | sort)
 
-if [ -n "$hits" ]; then
-  echo "FOUND non-GET HTTP methods — this server must stay read-only:"
-  echo "$hits"
-  exit 1
-fi
+failed=0
+report() {
+  if [ -n "$2" ]; then
+    echo "FOUND $1:"
+    echo "$2"
+    failed=1
+  fi
+}
 
-echo "OK: no POST/PATCH/PUT/DELETE method strings found outside node_modules."
+report "a write HTTP method outside the name/address-update modules" \
+  "$(grep -nEi "[\"'](POST|PATCH|PUT|DELETE)[\"']" "${sources[@]}" || true)"
+
+non_client=()
+for file in "${sources[@]}"; do [ "$file" = "./lgl.js" ] || non_client+=("$file"); done
+report "a direct fetch() outside lgl.js and the update modules" \
+  "$(grep -nE "\bfetch[[:space:]]*\(" "${non_client[@]}" || true)"
+
+report "an import of a raw write transport outside its own module" \
+  "$(grep -nE "\b(patchConstituentName|postStreetAddress|patchStreetAddress)\b" "${sources[@]}" || true)"
+
+if [ "$failed" -ne 0 ]; then exit 1; fi
+echo "OK: writes are confined to name-updates.js and address-updates.js (${#sources[@]} other files checked)."

@@ -4,11 +4,13 @@ Operating knowledge for working against the Moraga Community Foundation's Little
 Green Light account. Everything here was verified against the live account on
 **2026-10-14** unless noted. Re-verify before relying on an id or a behavior.
 
-## This repo is read-only by construction
+## Writes are confined to two previewed modules
 
-`lgl.js` exposes only a GET request function. Keep it that way, and run
-`npm run audit:readonly` after any change. Writes to LGL belong in a separate
-one-off script outside this repo (the scratchpad is the right home), or in the
+`lgl.js` exposes only a GET request function. The only write transports are
+`name-updates.js` (name fields) and `address-updates.js` (street addresses: add,
+update, mark not current). Both require a preview, an approved one-use token, one
+write with no retries and a verifying re-read. Run `npm run audit:safety` after
+any change. Other writes belong in a one-off script outside this repo, or in the
 `mcf-peer-fundraising` WordPress plugin, which owns the automated write path.
 
 ## Deletions are Rob's to perform
