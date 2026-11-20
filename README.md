@@ -127,9 +127,12 @@ Rules built in because of LGL behavior seen in the October 2026 cleanup (AGENTS.
   preferred address; pass `make_preferred: false` to override.
 - Input is validated: two-letter US state or territory codes, ZIP or ZIP+4, a
   non-empty street, and no city, state or ZIP packed onto the end of `street`
-  (checked against the saved city when an update changes only the street). An
-  existing single-line street is re-sent unchanged on a PATCH, with a note in the
-  preview, so junk addresses can still be marked inactive.
+  (checked against the saved city when an update changes only the street).
+- A PATCH re-sends the address's street, city, state and ZIP, so an existing
+  address must already be split into those fields. A preview for an address with
+  a single-line street, or an empty city, state or ZIP, is refused until an
+  `update` supplies them. This applies to `mark_inactive` too: split the address
+  first, then mark it inactive.
 - Verification requires every field it checks to be present in LGL's response; a
   missing field is reported, not assumed empty. Empty string and null count as
   the same empty value. Only US addresses

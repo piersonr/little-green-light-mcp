@@ -400,8 +400,15 @@ export function createAddressUpdateService({
       }
     }
 
-    if (method === "patch" && looksCombined(String(target.street ?? ""), target.city)) {
-      notes.push("This address's street still holds city, state or ZIP text. It is re-sent unchanged so LGL cannot reset it; split it with an update if the address stays in use.");
+    // Every PATCH re-sends the managed fields, so an address must already be in
+    // separate street, city, state and postal_code fields before it is written.
+    if (method === "patch") {
+      const blank = ["city", "state", "postal_code"].filter(key => !String(target[key] ?? "").trim());
+      if (blank.length || looksCombined(String(target.street ?? ""), target.city)) {
+        fail(`This address is not split into separate fields (${blank.length ? `empty: ${blank.join(", ")}` : "street holds city, state or ZIP text"}). ` +
+          "Update it first with street, city, state and postal_code each in its own field" +
+          (action === "mark_inactive" ? ", then mark it inactive." : ", in the same update or before this change."));
+      }
     }
     const after = (method === "post" ? [...expected, target] : expected).map(shapeAddress);
 

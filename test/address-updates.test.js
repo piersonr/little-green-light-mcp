@@ -412,10 +412,21 @@ test("verification refuses a saved address that omits a field it should have", a
   }
 });
 
-test("a new street is checked against the saved city; an old single-line street is flagged, not blocked", async () => {
-  const service = fixture([addr(1, { is_preferred: true }), addr(2, { street: "2 Old Rd, Moraga, CA 94556" })]);
+test("a new street is checked against the saved city; an unsplit address must be split before any other write", async () => {
+  const service = fixture([addr(1, { is_preferred: true }), addr(2, { street: "2 Old Rd, Moraga, CA 94556" }),
+    addr(3, { street: "3 Old Rd Moraga CA 94556", city: "", state: "", postal_code: "" })]);
   await assert.rejects(service.preview({ id: 42, action: "update", address_id: 1, address: { street: "9 New Rd, Moraga" } }), /city, state or ZIP/);
-  const preview = await service.preview({ id: 42, action: "mark_inactive", address_id: 2 });
-  assert.equal(preview.status, "preview");
-  assert.match(preview.notes.join(" "), /still holds city, state or ZIP/);
+  await assert.rejects(service.preview({ id: 42, action: "mark_inactive", address_id: 2 }), /not split.*then mark it inactive/);
+  await assert.rejects(service.preview({ id: 42, action: "update", address_id: 2, address: { address_type: "Work" } }), /not split/);
+  await assert.rejects(service.preview({ id: 42, action: "mark_inactive", address_id: 3 }), /empty: city, state, postal_code/);
+  await assert.rejects(service.preview({ id: 42, action: "update", address_id: 3, address: { street: "3 Old Rd" } }), /empty: city, state, postal_code/);
+  assert.equal(service.writes.length, 0);
+
+  const split = await service.preview({ id: 42, action: "update", address_id: 3,
+    address: { street: "3 Old Rd", city: "Moraga", state: "CA", postal_code: "94556" } });
+  assert.equal((await apply(service, split)).verified, true);
+  const fixed = await service.preview({ id: 42, action: "update", address_id: 2, address: { street: "2 Old Rd" } });
+  assert.equal((await apply(service, fixed)).verified, true);
+  const inactive = await service.preview({ id: 42, action: "mark_inactive", address_id: 2 });
+  assert.equal((await apply(service, inactive)).verified, true);
 });
