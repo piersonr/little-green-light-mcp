@@ -10,9 +10,12 @@ The server name is `lgl-mcp`. How you register it depends on the host — see Se
 ## Bounded name updates
 
 The eight lookup tools remain read-only: `lgl.js` exposes only a `GET` request function.
-The separate `name-updates.js` module implements the only write transport: a single
-name-only `PATCH` to an existing constituent. There are no create, delete, gift,
-contact-information, group, note, or relationship write tools.
+Two separate modules hold the only write transports. `name-updates.js` sends a
+single name-only `PATCH` to an existing constituent. `address-updates.js` (below)
+adds one street address or edits one existing one. There are no delete, gift,
+email, phone, group, note, or relationship write tools, and no way to create a
+constituent. Both writers share one per-constituent lock, so a name update and an
+address update never overlap on the same record.
 
 1. Call `preview_constituent_name_update` with an exact constituent ID and explicit
    name fields. Resolve the constituent identity before preparing the preview.
@@ -106,7 +109,10 @@ Management") and a read-only GET of a live record on 2026-11-19:
 | Address types | `GET /types/street_address_types` (Home 1, Work 2, Other 3, School 4) |
 
 Fields sent: `street`, `city`, `state`, `postal_code`, `street_address_type_id`,
-`is_preferred`, `not_current`. County, country and seasonal fields are never sent.
+`is_preferred`, `not_current`. Every PATCH re-sends the address's current street,
+city, state, ZIP and type alongside the change, so none of them is left to LGL's
+defaults. County, country and seasonal fields are never sent. A new address is
+verified to have come back with no country, county or seasonal setting.
 `DELETE /street_addresses/{id}` exists in LGL but is deliberately not implemented.
 
 Rules built in because of LGL behavior seen in the October 2026 cleanup (AGENTS.md):
@@ -117,8 +123,10 @@ Rules built in because of LGL behavior seen in the October 2026 cleanup (AGENTS.
   then promotes another address of its own choosing. To retire a preferred address,
   first add or update the replacement with `make_preferred: true` (the preview shows
   the old one losing the flag), then `mark_inactive` the old one.
+- A new address is made preferred by default when the constituent has no current
+  preferred address; pass `make_preferred: false` to override.
 - Input is validated: two-letter US state or territory codes, ZIP or ZIP+4, a
-  non-empty street, and no city/state/ZIP packed into `street`. Only US addresses
+  non-empty street, and no city, state or ZIP packed onto the end of `street`. Only US addresses
   can be edited, and a new address cannot duplicate an active one.
 
 Address updates are tested offline with a simulated LGL and a stdio MCP exchange.
@@ -209,7 +217,7 @@ npm run audit:safety     # both checks above
 ## Rate limits
 
 LGL allows 300 API calls per 5-minute window. Both transports share a sliding-window
-throttle. GET requests retry with backoff on 429/5xx. The name writer sends a single
-PATCH without retries, then verifies with GET. Restart or reconnect the MCP client
+throttle. GET requests retry with backoff on 429/5xx. Each writer sends a single
+PATCH or POST without retries, then verifies with GET. Restart or reconnect the MCP client
 after installing an update so it discovers the new tools; existing client
 registration and credentials do not need to change.

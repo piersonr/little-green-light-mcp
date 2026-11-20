@@ -5,7 +5,8 @@ const API = "https://api.littlegreenlight.com/api/v1";
 let record = { id: 42, is_org: false, first_name: "Alex", last_name: "Example",
   addressee: "Alex Example", relationships: [], email_addresses: [], updated_at: "before" };
 let addresses = [{ id: 7, street: "1 Old Rd", city: "Moraga", state: "CA", postal_code: "94556",
-  country: null, street_address_type_id: 1, street_type_name: "Home", is_preferred: true, not_current: false }];
+  country: null, county: null, seasonal: false, street_address_type_id: 1, street_type_name: "Home",
+  is_preferred: true, not_current: false }];
 const json = value => ({ ok: true, json: async () => structuredClone(value) });
 
 globalThis.fetch = async (input, options = {}) => {
@@ -28,7 +29,8 @@ globalThis.fetch = async (input, options = {}) => {
     if (method === "POST") {
       const body = JSON.parse(options.body);
       if (body.is_preferred) addresses.forEach(a => { a.is_preferred = false; });
-      addresses.push({ id: 8, country: null, street_type_name: "Home", ...body });
+      addresses.push({ id: 8, country: null, county: null, seasonal: false, seasonal_from: "01-01",
+        seasonal_to: "12-31", street_type_name: "Home", ...body });
       return { ok: true };
     }
   }

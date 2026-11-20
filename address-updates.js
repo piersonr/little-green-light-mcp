@@ -20,6 +20,7 @@
 //    siblings; make another address preferred instead.
 import { createHash, randomBytes } from "node:crypto";
 import { request, throttle, authenticatedHeaders, LglError } from "./lgl.js";
+import { constituentLocks } from "./locks.js";
 
 const API = "https://api.littlegreenlight.com/api/v1";
 
@@ -28,13 +29,12 @@ const API = "https://api.littlegreenlight.com/api/v1";
 const POST_FIELDS = new Set(["street", "city", "state", "postal_code",
   "street_address_type_id", "is_preferred", "not_current"]);
 const PATCH_FIELDS = POST_FIELDS;
+// Fields this module manages. Every PATCH re-sends their current values so
+// none of them is ever left to LGL's defaults (see the flag quirk above).
+const MANAGED_FIELDS = Object.freeze(["street", "city", "state", "postal_code", "street_address_type_id"]);
 
-// Fields compared when verifying a target address. Everything else LGL
-// derives (zip5, lat/lng, verified, timestamps, street_type_name) is ignored
-// on the target but still compared on every other address.
-const ADDRESS_FIELDS = Object.freeze(["street", "city", "state", "postal_code", "county",
-  "country", "street_address_type_id", "is_preferred", "not_current",
-  "seasonal", "seasonal_from", "seasonal_to"]);
+// Fields LGL derives or that only label others. Verification compares every
+// other field on every address, the target included.
 const DERIVED_ADDRESS_FIELDS = new Set(["updated_at", "created_at", "zip5", "lat", "lng",
   "verified", "verified_on", "street_type_name", "item_id", "item_type", "parent_id"]);
 const DERIVED_PROFILE_FIELDS = new Set(["updated_at", "sort_name", "street_addresses"]);
@@ -70,6 +70,19 @@ function text(field, value, { max = 250, multiline = false } = {}) {
   return trimmed;
 }
 
+// Account convention: never a single-line address. Flags a street whose last
+// line ends in ", <state>" (optionally with a ZIP), ", <ZIP>", a full state
+// name with a ZIP, or ", <the city being entered>".
+function looksCombined(street, city) {
+  const last = street.split("\n").pop().trim();
+  const state = last.match(/,\s*([A-Za-z]{2})\.?(\s+\d{5}(-\d{4})?)?$/);
+  if (state && STATE_SET.has(state[1].toUpperCase())) return true;
+  if (/,\s*\d{5}(-\d{4})?$/.test(last)) return true;
+  if (/,\s*[A-Za-z][A-Za-z ]+\s+\d{5}(-\d{4})?$/.test(last)) return true;
+  const c = typeof city === "string" ? city.trim().toLowerCase() : "";
+  return Boolean(c) && last.toLowerCase().endsWith(`, ${c}`);
+}
+
 /** Validate and normalize the address fields supplied by the caller. */
 function validateFields(input, { requireAll }) {
   if (!input || typeof input !== "object" || Array.isArray(input)) fail("Address fields are required.");
@@ -82,9 +95,8 @@ function validateFields(input, { requireAll }) {
   if (input.street !== undefined) {
     out.street = text("street", input.street, { multiline: true }).replace(/[ \t]*\n[ \t]*/g, "\n");
     if (!out.street) fail("street cannot be empty.");
-    // Account convention: never a single-line address with city/state/ZIP in street.
-    if (/,?\s+[A-Za-z]{2}\s+\d{5}(-\d{4})?\s*$/.test(out.street)) {
-      fail("street appears to include the state and ZIP. Put city, state and postal_code in their own fields.");
+    if (looksCombined(out.street, input.city)) {
+      fail("street appears to include the city, state or ZIP. Put city, state and postal_code in their own fields.");
     }
   }
   if (input.city !== undefined) {
@@ -121,7 +133,10 @@ function stable(value) {
 }
 const encode = value => JSON.stringify(stable(value));
 const fingerprint = value => createHash("sha256").update(encode(value)).digest("hex");
-const same = (a, b) => encode(a ?? null) === encode(b ?? null);
+// LGL returns empty text fields as either null or "" (country is "" on some
+// records and null on others), so treat the two as equal when comparing.
+const norm = value => (value === "" || value === undefined ? null : value);
+const same = (a, b) => encode(norm(a)) === encode(norm(b));
 
 /** Compact, display-friendly view of one LGL street address. */
 export function shapeAddress(a) {
@@ -149,6 +164,11 @@ function identityOf(record) {
   };
 }
 
+/** Current values of the managed fields, omitting ones LGL has empty. */
+function managedOf(address) {
+  return Object.fromEntries(MANAGED_FIELDS.filter(k => address[k] != null && address[k] !== "").map(k => [k, address[k]]));
+}
+
 const isUs = a => a.country == null || /^\s*(|us|usa|united states( of america)?)\s*$/i.test(a.country);
 
 // --- read helpers ----------------------------------------------------------
@@ -157,8 +177,11 @@ async function readAddresses(read, id) {
   const payload = await read(`/constituents/${id}/street_addresses`, { limit: 100, offset: 0 });
   const items = payload?.items;
   if (!Array.isArray(items)) fail("LGL returned an unexpected street-address list.");
-  const total = Number(payload.total_items ?? items.length);
-  if (!Number.isFinite(total) || total > items.length) {
+  const total = Number(payload.total_items);
+  if (payload.total_items == null || !Number.isFinite(total)) {
+    fail("LGL did not say how many street addresses this constituent has, so the list cannot be trusted as complete. No update was prepared.");
+  }
+  if (total !== items.length) {
     fail("This constituent has more street addresses than one page returns. No update was prepared.");
   }
   for (const a of items) {
@@ -226,10 +249,10 @@ export async function patchStreetAddress(addressIdValue, body) {
 // --- service ----------------------------------------------------------------
 
 export function createAddressUpdateService({
-  read = request, post = postStreetAddress, patch = patchStreetAddress,
+  read = request, post = postStreetAddress, patch = patchStreetAddress, locks = constituentLocks,
 } = {}) {
   const plans = new Map();
-  const busy = new Set();
+  const busy = locks;
 
   async function resolveTypeId(name) {
     const payload = await read("/types/street_address_types");
@@ -280,12 +303,17 @@ export function createAddressUpdateService({
         (a.street ?? "").trim().toLowerCase() === fields.street.toLowerCase() &&
         (a.postal_code ?? "").slice(0, 5) === fields.postal_code.slice(0, 5));
       if (dupe) fail(`An active address with the same street and ZIP already exists (id ${dupe.id}). Use update instead.`);
-      const preferred = args.make_preferred === true || addresses.length === 0;
-      if (addresses.length === 0 && args.make_preferred !== true) notes.push("This is the constituent's only address, so it will be preferred.");
+      const hasCurrentPreferred = addresses.some(a => a.is_preferred && !a.not_current);
+      const preferred = args.make_preferred ?? !hasCurrentPreferred;
+      if (args.make_preferred === undefined && preferred) {
+        notes.push("The constituent has no current preferred address, so this one will be preferred.");
+      }
       payload = { street: fields.street, city: fields.city, state: fields.state, postal_code: fields.postal_code,
         street_address_type_id: typeId ?? 1, is_preferred: preferred, not_current: false };
       method = "post";
-      target = { id: "new", ...payload, street_type_name: fields.address_type ?? "Home" };
+      // A new address must come back with nothing set beyond what was sent.
+      target = { id: "new", ...payload, street_type_name: fields.address_type ?? "Home",
+        country: null, county: null, seasonal: false };
       expected = addresses.map(a => preferred && a.is_preferred ? { ...a, is_preferred: false } : a);
       if (preferred && addresses.some(a => a.is_preferred)) {
         notes.push("Making this address preferred is expected to clear the preferred flag on the current preferred address.");
@@ -299,9 +327,11 @@ export function createAddressUpdateService({
           message: "That address is already marked not current." };
         const others = addresses.filter(a => a.id !== addressId);
         if (current.is_preferred && others.length) {
-          fail("That address is the preferred one. LGL picks a new preferred address on its own when the flag is cleared. First make the correct address preferred (update with make_preferred: true, or add with make_preferred: true), then mark this one inactive.");
+          fail(others.every(a => a.not_current)
+            ? `That address is the preferred one, and the constituent's other addresses (${others.map(a => a.id).join(", ")}) are all inactive. LGL would promote one of those inactive addresses on its own. Add the replacement address with make_preferred: true first, then mark this one inactive.`
+            : "That address is the preferred one. LGL picks a new preferred address on its own when the flag is cleared. First make the correct current address preferred (update with make_preferred: true, or add with make_preferred: true), then mark this one inactive.");
         }
-        payload = { is_preferred: false, not_current: true };
+        payload = { ...managedOf(current), is_preferred: false, not_current: true };
         if (current.is_preferred) notes.push("This is the constituent's only address. It will be left with no preferred, current address.");
       } else {
         if (current.not_current && args.make_preferred === true) {
@@ -316,7 +346,7 @@ export function createAddressUpdateService({
         if (!Object.keys(changed).length && preferred === current.is_preferred) {
           return { status: "unchanged", constituent: identityOf(record), addresses: before, message: "No differences from the saved address." };
         }
-        payload = { ...changed, is_preferred: preferred, not_current: current.not_current };
+        payload = { ...managedOf(current), ...changed, is_preferred: preferred, not_current: current.not_current };
         const result = { ...current, ...changed };
         if (!String(result.street ?? "").trim()) fail("The update would leave the address without a street.");
       }
@@ -351,15 +381,19 @@ export function createAddressUpdateService({
     };
   }
 
-  function compareAddress(actual, wanted, fields) {
-    return fields.filter(f => !same(actual[f], wanted[f]));
+  // Compare every non-derived field either side has. `skip` lists fields
+  // whose value LGL defaults on create and this module never sets.
+  function compareAddress(actual, wanted, skip = []) {
+    const keys = [...new Set([...Object.keys(wanted), ...Object.keys(actual)])]
+      .filter(k => k !== "id" && !DERIVED_ADDRESS_FIELDS.has(k) && !skip.includes(k));
+    return keys.filter(k => !same(actual[k], wanted[k]));
   }
 
   async function apply({ confirmation_token: token, confirmed } = {}) {
     if (confirmed !== true) fail("Explicit approval of the preview is required before applying.");
     const plan = plans.get(token);
     if (!plan) fail("Unknown or already-used preview token. Prepare a fresh preview.");
-    if (busy.has(plan.id)) fail("Another address update for this constituent is running. No update was sent.");
+    if (busy.has(plan.id)) fail("Another update for this constituent is running. No update was sent.");
     busy.add(plan.id);
     plans.delete(token);
     try {
@@ -386,14 +420,14 @@ export function createAddressUpdateService({
         if (added.length !== 1) problems.push({ issue: `expected exactly one new address, found ${added.length}` });
         targetSaved = added.length === 1 ? added[0] : null;
         if (targetSaved) {
-          const diff = compareAddress(targetSaved, plan.target, [...POST_FIELDS]);
+          const diff = compareAddress(targetSaved, plan.target, ["seasonal_from", "seasonal_to"]);
           if (diff.length) problems.push({ address_id: targetSaved.id, issue: "new address does not match the preview", fields: diff });
         }
       } else {
         targetSaved = savedById.get(plan.addressId) ?? null;
         if (!targetSaved) problems.push({ address_id: plan.addressId, issue: "address is missing after the update" });
         else {
-          const diff = compareAddress(targetSaved, plan.target, ADDRESS_FIELDS);
+          const diff = compareAddress(targetSaved, plan.target);
           if (diff.length) problems.push({ address_id: plan.addressId, issue: "saved address does not match the preview", fields: diff });
         }
         const extra = saved.addresses.filter(a => !beforeIds.has(a.id));
@@ -403,8 +437,7 @@ export function createAddressUpdateService({
         if (wanted.id === "new" || (plan.method === "patch" && wanted.id === plan.addressId)) continue;
         const actual = savedById.get(wanted.id);
         if (!actual) { problems.push({ address_id: wanted.id, issue: "other address is missing after the update" }); continue; }
-        const keys = [...new Set([...Object.keys(wanted), ...Object.keys(actual)])].filter(k => !DERIVED_ADDRESS_FIELDS.has(k));
-        const diff = keys.filter(k => !same(actual[k], wanted[k]));
+        const diff = compareAddress(actual, wanted);
         if (diff.length) problems.push({ address_id: wanted.id, issue: "other address changed unexpectedly", fields: diff });
       }
       const profileKeys = [...new Set([...Object.keys(current.record), ...Object.keys(saved.record)])]

@@ -232,3 +232,52 @@ test("failed write consumes its token and cannot be replayed", async () => {
   await assert.rejects(apply(service, preview), /already-used/);
   assert.equal(writes, 1);
 });
+
+test("a saved record that omits a written or previously present name field is not counted as verified", async () => {
+  for (const drop of ["middle_name", "addressee"]) {
+    let reads = 0;
+    const record = { ...base(), middle_name: "Q" };
+    const service = createNameUpdateService({
+      read: async () => {
+        reads++;
+        const copy = structuredClone(record);
+        if (reads >= 3) delete copy[drop];
+        return copy;
+      },
+      patch: async (_id, payload) => Object.assign(record, payload),
+    });
+    const preview = await service.preview({ id: 42, changes: { middle_name: "" } });
+    const result = await apply(service, preview);
+    assert.equal(result.status, "verification_unavailable", drop);
+    assert.equal(result.verified, false);
+  }
+});
+
+test("a name change without addressee warns that addressee and salutation will not recalculate", async () => {
+  const noted = await fixture().preview({ id: 42, changes: { last_name: "Exemplar" } });
+  assert.match(noted.notes.join(" "), /does not recalculate addressee/);
+  const withAddressee = await fixture().preview({ id: 42, changes: { last_name: "Exemplar", addressee: "Alex Exemplar" } });
+  assert.equal(withAddressee.notes, undefined);
+  assert.equal((await prepare(fixture())).notes, undefined);
+});
+
+test("name and address writes share one per-constituent lock", async () => {
+  const { createAddressUpdateService } = await import("../address-updates.js");
+  let finish;
+  const wait = new Promise(resolve => { finish = resolve; });
+  const record = base();
+  const addresses = [{ id: 7, street: "1 A St", city: "Moraga", state: "CA", postal_code: "94556",
+    street_address_type_id: 1, is_preferred: false, not_current: false }];
+  const read = async path => path.endsWith("street_addresses")
+    ? { total_items: 1, items: structuredClone(addresses) } : structuredClone(record);
+  let addressWrites = 0;
+  const names = createNameUpdateService({ read, patch: async (_id, payload) => { await wait; Object.assign(record, payload); } });
+  const places = createAddressUpdateService({ read, patch: async () => { addressWrites++; } });
+  const namePreview = await prepare(names);
+  const addressPreview = await places.preview({ id: 42, action: "mark_inactive", address_id: 7 });
+  const running = apply(names, namePreview);
+  await assert.rejects(places.apply({ confirmation_token: addressPreview.confirmation_token, confirmed: true }), /running/);
+  finish();
+  assert.equal((await running).verified, true);
+  assert.equal(addressWrites, 0);
+});

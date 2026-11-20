@@ -2,6 +2,7 @@
 // existing constituent. No generic write method, create, delete, or retries.
 import { createHash, randomBytes } from "node:crypto";
 import { request, throttle, authenticatedHeaders, LglError } from "./lgl.js";
+import { constituentLocks } from "./locks.js";
 
 export const NAME_FIELDS = Object.freeze([
   "prefix", "first_name", "middle_name", "last_name", "suffix",
@@ -101,9 +102,9 @@ export async function patchConstituentName(idValue, payload) {
 }
 
 /** Each service owns one-use previews and per-constituent write locks. */
-export function createNameUpdateService({ read = request, patch = patchConstituentName } = {}) {
+export function createNameUpdateService({ read = request, patch = patchConstituentName, locks = constituentLocks } = {}) {
   const plans = new Map();
-  const busy = new Set();
+  const busy = locks;
 
   async function preview({ id: idValue, changes: input }) {
     const id = constituentId(idValue);
@@ -137,6 +138,13 @@ export function createNameUpdateService({ read = request, patch = patchConstitue
     const changed = Object.fromEntries(Object.entries(changes).filter(([k, v]) => v !== before[k]));
     const diff = Object.entries(changed).map(([field, after]) => ({ field, before: before[field], after }));
     if (!diff.length) return { status: "unchanged", constituent: identityOf(record), changes: [] };
+    // LGL generates addressee and salutation once, at creation, and never
+    // recalculates them (AGENTS.md).
+    const notes = [];
+    if (diff.some(d => ["prefix", "first_name", "middle_name", "last_name", "suffix", "spouse_name"].includes(d.field)) &&
+        !Object.hasOwn(changed, "addressee")) {
+      notes.push(`LGL does not recalculate addressee ("${before.addressee}") or salutation when names change. Include addressee in this update if it should change too; salutation cannot be edited with this tool.`);
+    }
 
     // PATCH only the requested differences. If LGL requires additional fields,
     // surface that rejection rather than resending unrelated donor data.
@@ -150,6 +158,7 @@ export function createNameUpdateService({ read = request, patch = patchConstitue
       constituent: identityOf(record),
       changes: diff,
       confirmation_token: token,
+      ...(notes.length ? { notes } : {}),
       instruction: "Show these exact changes to the user and obtain approval before applying. A preview token is not approval. The token is valid only in this MCP server session.",
     };
   }
@@ -158,7 +167,7 @@ export function createNameUpdateService({ read = request, patch = patchConstitue
     if (confirmed !== true) fail("Explicit approval of the preview is required before applying.");
     const plan = plans.get(token);
     if (!plan) fail("Unknown or already-used preview token. Prepare a fresh preview.");
-    if (busy.has(plan.id)) fail("Another name update for this constituent is running. No update was sent.");
+    if (busy.has(plan.id)) fail("Another update for this constituent is running. No update was sent.");
     busy.add(plan.id);
     plans.delete(token);
     try {
@@ -175,6 +184,11 @@ export function createNameUpdateService({ read = request, patch = patchConstitue
         if (!saved || saved.id !== plan.id || typeof saved.is_org !== "boolean") {
           throw new Error("Incomplete verification record");
         }
+        // A field the record had, or that was written, must still be present;
+        // an omitted field is not evidence that a value (or a clearing) saved.
+        const missing = NAME_FIELDS.filter(field =>
+          (Object.hasOwn(current, field) || Object.hasOwn(plan.payload, field)) && !Object.hasOwn(saved, field));
+        if (missing.length) throw new Error("Incomplete verification record");
         actual = namesOf(saved);
       }
       catch { return { status: "verification_unavailable", id: plan.id, verified: false,

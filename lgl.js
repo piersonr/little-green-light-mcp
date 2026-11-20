@@ -1,7 +1,8 @@
 // HTTP client for the Little Green Light REST API.
 //
 // request() remains GET-only. Authentication and rate limiting are shared
-// with the separate, field-restricted name writer in name-updates.js.
+// with the separate, field-restricted writers in name-updates.js and
+// address-updates.js.
 
 import { readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";

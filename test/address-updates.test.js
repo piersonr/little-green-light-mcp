@@ -22,7 +22,7 @@ const TYPES = { items: [{ id: 1, name: "Home" }, { id: 2, name: "Work" }, { id: 
  * is_preferred on one address clears it on the others. `misbehave` lets a
  * test simulate LGL saving something different from what was sent.
  */
-function fixture(addresses = [addr(1, { is_preferred: true }), addr(2)], { misbehave = s => s, failWrite } = {}) {
+function fixture(addresses = [addr(1, { is_preferred: true }), addr(2)], { misbehave = s => s, failWrite, resetOmitted = false } = {}) {
   let state = { record: profile(), addresses: structuredClone(addresses) };
   let nextId = 100;
   const reads = [], writes = [];
@@ -53,6 +53,11 @@ function fixture(addresses = [addr(1, { is_preferred: true }), addr(2)], { misbe
       writes.push({ method: "PATCH", id, body: structuredClone(body) });
       if (failWrite) throw failWrite;
       const a = state.addresses.find(x => x.id === id);
+      if (resetOmitted) {
+        for (const field of ["street", "city", "state", "postal_code", "street_address_type_id"]) if (!(field in body)) a[field] = null;
+        if (!("is_preferred" in body)) a.is_preferred = true;
+        if (!("not_current" in body)) a.not_current = false;
+      }
       Object.assign(a, body, { updated_at: "after" });
       if (body.street_address_type_id) a.street_type_name = TYPES.items.find(t => t.id === body.street_address_type_id).name;
       commit(id, body.is_preferred);
@@ -96,7 +101,8 @@ test("update: PATCHes only changed fields plus both flags, and verifies", async 
   const service = fixture();
   const preview = await service.preview({ id: 42, action: "update", address_id: 2,
     address: { city: "Moraga", postal_code: "94556-0001", address_type: "Work" } });
-  assert.deepEqual(preview.request.body, { postal_code: "94556-0001", street_address_type_id: 2, is_preferred: false, not_current: false });
+  assert.deepEqual(preview.request.body, { street: "2 Old Rd", city: "Moraga", state: "CA",
+    postal_code: "94556-0001", street_address_type_id: 2, is_preferred: false, not_current: false });
   assert.equal(preview.addresses_after.find(a => a.id === 2).address_type, "Work");
   const result = await apply(service, preview);
   assert.equal(result.verified, true, JSON.stringify(result.problems));
@@ -106,14 +112,16 @@ test("update: PATCHes only changed fields plus both flags, and verifies", async 
 test("update: make_preferred moves the preferred flag and is verified", async () => {
   const service = fixture();
   const preview = await service.preview({ id: 42, action: "update", address_id: 2, make_preferred: true });
-  assert.deepEqual(preview.request.body, { is_preferred: true, not_current: false });
+  assert.deepEqual(preview.request.body, { street: "2 Old Rd", city: "Moraga", state: "CA",
+    postal_code: "94556", street_address_type_id: 1, is_preferred: true, not_current: false });
   assert.equal((await apply(service, preview)).verified, true);
 });
 
 test("mark_inactive: sends not_current with both flags explicit and verifies", async () => {
   const service = fixture();
   const preview = await service.preview({ id: 42, action: "mark_inactive", address_id: 2 });
-  assert.deepEqual(preview.request.body, { is_preferred: false, not_current: true });
+  assert.deepEqual(preview.request.body, { street: "2 Old Rd", city: "Moraga", state: "CA",
+    postal_code: "94556", street_address_type_id: 1, is_preferred: false, not_current: true });
   assert.equal(preview.addresses_after.find(a => a.id === 2).not_current, true);
   const result = await apply(service, preview);
   assert.equal(result.verified, true, JSON.stringify(result.problems));
@@ -154,6 +162,11 @@ test("bad input is rejected before any read or write", async () => {
     { id: 42, action: "add", address: { ...NEW, postal_code: "ABCDE" } },
     { id: 42, action: "add", address: { street: "1 A St", city: "Moraga", state: "CA" } },
     { id: 42, action: "add", address: { ...NEW, street: "1 A St, Moraga, CA 94556" } },
+    { id: 42, action: "add", address: { ...NEW, street: "1 A St, Moraga, CA" } },
+    { id: 42, action: "add", address: { ...NEW, street: "1 A St, Moraga" } },
+    { id: 42, action: "add", address: { ...NEW, street: "1 A St, California 94556" } },
+    { id: 42, action: "add", address: { ...NEW, street: "1 A St\nMoraga, CA. 94556" } },
+    { id: 42, action: "add", address: { ...NEW, street: "1 A St, 94556" } },
     { id: 42, action: "add", address: { ...NEW, country: "US" } },
     { id: 42, action: "add", address: { ...NEW, address_type: "Vacation" } },
     { id: 42, action: "add", address: { ...NEW, street: "1 A St\u0000" } },
@@ -291,4 +304,74 @@ test("write transport failures never retry or leak response bodies", async () =>
     });
     assert.equal(calls, 1);
   }
+});
+
+test("single-line guard still allows ordinary multi-part streets", async () => {
+  const service = fixture([]);
+  for (const street of ["PO Box 94556", "1148 Alpine Road, Suite 100", "12 Main St\nApt 4B", "1 Ca Ave"]) {
+    const preview = await service.preview({ id: 42, action: "add", address: { ...NEW, street } });
+    assert.equal(preview.status, "preview", street);
+  }
+});
+
+test("every PATCH re-sends the managed fields, so an LGL that resets omitted fields cannot erase them", async () => {
+  for (const args of [
+    { id: 42, action: "mark_inactive", address_id: 2 },
+    { id: 42, action: "update", address_id: 2, make_preferred: true },
+    { id: 42, action: "update", address_id: 2, address: { city: "Orinda" } },
+  ]) {
+    // A fake LGL where any managed field omitted from a PATCH is cleared,
+    // generalizing the documented flag quirk.
+    const service = fixture(undefined, { resetOmitted: true });
+    const preview = await service.preview(args);
+    for (const field of ["street", "city", "state", "postal_code", "street_address_type_id", "is_preferred", "not_current"]) {
+      assert.ok(Object.hasOwn(preview.request.body, field), `${args.action} omits ${field}`);
+    }
+    const result = await apply(service, preview);
+    assert.equal(result.verified, true, JSON.stringify(result.problems));
+  }
+});
+
+test("a new address defaults to preferred when no current preferred address exists", async () => {
+  const service = fixture([addr(1, { not_current: true, is_preferred: true }), addr(2, { not_current: true })]);
+  const preview = await service.preview({ id: 42, action: "add", address: NEW });
+  assert.equal(preview.request.body.is_preferred, true);
+  assert.match(preview.notes.join(" "), /no current preferred/);
+  assert.equal((await apply(service, preview)).verified, true);
+  const optOut = await fixture([addr(1, { not_current: true })]).preview({ id: 42, action: "add", address: NEW, make_preferred: false });
+  assert.equal(optOut.request.body.is_preferred, false);
+  const normal = await fixture().preview({ id: 42, action: "add", address: NEW });
+  assert.equal(normal.request.body.is_preferred, false);
+});
+
+test("a preferred address whose siblings are all inactive gives a usable remedy", async () => {
+  const service = fixture([addr(1, { is_preferred: true }), addr(2, { not_current: true })]);
+  await assert.rejects(service.preview({ id: 42, action: "mark_inactive", address_id: 1 }),
+    error => /all inactive/.test(error.message) && /Add the replacement/.test(error.message) && !/update with/.test(error.message));
+});
+
+test("an address list without a total count is refused", async () => {
+  const service = createAddressUpdateService({
+    read: async path => path.endsWith("street_addresses") ? { items: [addr(1)] } : profile(),
+  });
+  await assert.rejects(service.list({ id: 42 }), /cannot be trusted as complete/);
+  await assert.rejects(service.preview({ id: 42, action: "mark_inactive", address_id: 1 }), /cannot be trusted as complete/);
+});
+
+test("verification checks every saved field on the target, including defaults on a new address", async () => {
+  const cases = [
+    [{ id: 42, action: "add", address: NEW }, s => { s.addresses.at(-1).country = "US"; return s; }, "country"],
+    [{ id: 42, action: "add", address: NEW }, s => { s.addresses.at(-1).seasonal = true; return s; }, "seasonal"],
+    [{ id: 42, action: "update", address_id: 2, address: { city: "Orinda" } }, s => { s.addresses[1].county = "Contra Costa"; return s; }, "county"],
+    [{ id: 42, action: "mark_inactive", address_id: 2 }, s => { s.addresses[1].seasonal_to = "06-30"; return s; }, "seasonal_to"],
+  ];
+  for (const [args, misbehave, field] of cases) {
+    const service = fixture(undefined, { misbehave });
+    const result = await apply(service, await service.preview(args));
+    assert.equal(result.verified, false, field);
+    assert.ok(result.problems.some(p => p.fields?.includes(field)), JSON.stringify(result.problems));
+  }
+  // null and "" are the same empty value in LGL (country is "" on some records).
+  const blank = fixture(undefined, { misbehave: s => { s.addresses.at(-1).country = ""; return s; } });
+  assert.equal((await apply(blank, await blank.preview({ id: 42, action: "add", address: NEW }))).verified, true);
 });
