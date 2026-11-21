@@ -36,8 +36,8 @@ matched before the update. This was seen once, on an organization; in the same
 update `annual_report_name`, which also matched, did not change. It has not been
 observed on an individual. The prediction applies only when both fields are
 saved as exactly equal strings.
-The PATCH still sends only the requested fields. When `alt_addressee` equals the
-old addressee, the preview lists the copy under `expected_side_effects` so it is
+The PATCH still sends only the requested fields. When `alt_addressee` is saved as
+exactly the old addressee, the preview lists the copy under `expected_side_effects` so it is
 approved with the change. Verification accepts `alt_addressee` only at exactly
 the predicted value. If it stays unchanged, the update still verifies and the
 result lists it under `side_effects_not_observed`. Any other change to

@@ -399,7 +399,7 @@ test("other fields still fail verification alongside a predicted copy, including
 });
 
 test("null, missing or non-string alt_addressee values predict nothing and fail closed if they change", async () => {
-  for (const extra of [{ addressee: "", alt_addressee: null }, { addressee: "", alt_addressee: "" , drop: "alt_addressee" },
+  for (const extra of [{ addressee: "", alt_addressee: null }, { addressee: "", alt_addressee: "", drop: "alt_addressee" }, { addressee: null, alt_addressee: "" },
     { alt_addressee: 7 }, { addressee: null, alt_addressee: null }]) {
     const { drop, ...fields } = extra;
     const record = org(fields);
