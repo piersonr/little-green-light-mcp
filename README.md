@@ -31,6 +31,18 @@ re-reads and compares all name fields and other returned profile data. Only
 `updated_at` and the derived `sort_name` are allowed to change additionally.
 Already-correct names return `unchanged` and require no write.
 
+LGL has been observed copying a new `addressee` into `alt_addressee` when the two
+matched before the update. This was seen once, on an organization; in the same
+update `annual_report_name`, which also matched, did not change. It has not been
+observed on an individual. The prediction applies only when both fields are
+saved as exactly equal strings.
+The PATCH still sends only the requested fields. When `alt_addressee` is saved as
+exactly the old addressee, the preview lists the copy under `expected_side_effects` so it is
+approved with the change. Verification accepts `alt_addressee` only at exactly
+the predicted value. If it stays unchanged, the update still verifies and the
+result lists it under `side_effects_not_observed`. Any other change to
+`alt_addressee`, or to any other field, fails verification.
+
 Permitted fields: `prefix`, `first_name`, `middle_name`, `last_name`, `suffix`,
 `spouse_name`, `org_name`, and `addressee` (the label/display name). For an individual,
 `org_name` describes their employer and is refused. For an organization, only

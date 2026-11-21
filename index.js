@@ -181,7 +181,9 @@ server.registerTool(
     description:
       "Read an existing constituent and preview exact name-field changes. " +
       "Returns a one-use confirmation token. Does not write. Show the preview " +
-      "to the user and obtain approval before applying it. Native steward " +
+      "to the user and obtain approval before applying it, including any " +
+      "expected_side_effects (fields LGL changes on its own, such as alt_addressee " +
+      "following a new addressee). Native steward " +
       "assignments are not supported by LGL's published API.",
     inputSchema: {
       id: z.union([z.string().regex(/^[1-9]\d*$/), z.number().int().positive()]),
@@ -203,7 +205,10 @@ server.registerTool(
       "constituent. Requires explicit user approval of that preview. Re-reads " +
       "the record first, refuses stale previews, sends one name-only PATCH " +
       "without retries, then re-reads and verifies the saved names and other " +
-      "profile fields. Does not create constituents or edit stewards, contact " +
+      "profile fields. A predicted side effect (such as alt_addressee) passes " +
+      "only at its predicted value; if it did not happen, the result lists it " +
+      "under side_effects_not_observed, which should be shown to the user. " +
+      "Does not create constituents or edit stewards, contact " +
       "information, gifts, groups, notes, or relationships.",
     inputSchema: {
       confirmation_token: z.string().regex(/^[a-f0-9]{48}$/),

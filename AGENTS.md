@@ -36,6 +36,12 @@ have no reference to an address.
   same constituent. Re-read the whole constituent after any flag change.
 - **`PATCH /gifts/{id}` with `ack_template_name` returned HTTP 200 and did not
   change the value.** Do not trust a 200 here; verify by re-reading the gift.
+- **Changing `addressee` also changes `alt_addressee` when the two matched.**
+  Observed 2026-11-20 on an organization: a PATCH that sent only `addressee`
+  left `alt_addressee` equal to the new value, after it had equalled the old one.
+  `annual_report_name`, which also matched the old addressee, did not change.
+  The name tools predict this copy in the preview and verify it. Not yet observed
+  on an individual, or when `alt_addressee` differed beforehand.
 - **There is no `GET /gifts` collection** — it 404s. Use
   `/gifts/search?q[]=date_from=YYYY-MM-DD`, which is also the only way to page
   the whole gift history.

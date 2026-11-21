@@ -11,6 +11,14 @@ export const NAME_FIELDS = Object.freeze([
 const NAME_SET = new Set(NAME_FIELDS);
 const DERIVED_FIELDS = new Set(["updated_at", "sort_name"]);
 
+// Fields LGL copies a new value into when they held the same value as the
+// edited field before the write. Observed live on 2026-11-20: changing an
+// organization's addressee also changed alt_addressee, which had matched the
+// old addressee; annual_report_name, which also matched, did not change.
+// The PATCH never sends these fields; the preview predicts the copy and
+// verification accepts only the predicted value (or no change, reported).
+export const MIRRORED_FIELDS = Object.freeze({ addressee: "alt_addressee" });
+
 function fail(message) { throw new LglError(message); }
 
 function constituentId(value) {
@@ -150,6 +158,16 @@ export function createNameUpdateService({
     // LGL generates addressee and salutation once, at creation, and never
     // recalculates them (AGENTS.md).
     const notes = [];
+    // Predict LGL's copy into a mirrored field that currently matches the old value.
+    const sideEffects = Object.entries(changed)
+      .filter(([field]) => Object.hasOwn(MIRRORED_FIELDS, field))
+      .map(([field, value]) => ({ source: field, field: MIRRORED_FIELDS[field], value }))
+      // Only two saved strings that are exactly equal; null or missing values
+      // predict nothing, so any change to them fails verification.
+      .filter(({ field, source }) => typeof record[field] === "string" && typeof record[source] === "string" &&
+        record[field] === record[source])
+      .map(({ source, field, value }) => ({ field, before: record[field], after: value,
+        reason: `LGL has been observed copying a new ${source} into ${field} when they matched before the update, so this change is predicted. It is not sent in the request.` }));
     if (diff.some(d => ["prefix", "first_name", "middle_name", "last_name", "suffix", "spouse_name"].includes(d.field)) &&
         !Object.hasOwn(changed, "addressee")) {
       notes.push(`LGL does not recalculate addressee ("${before.addressee}") or salutation when names change. Include addressee in this update if it should change too; salutation cannot be edited with this tool.`);
@@ -161,11 +179,12 @@ export function createNameUpdateService({
     const token = randomBytes(24).toString("hex");
     // Bound memory without aging or silently evicting an existing preview.
     if (plans.size >= 100) fail("Too many unused previews in this server session. Restart the MCP server to clear them.");
-    plans.set(token, { id, fingerprint: fingerprint(record), payload, after, diff });
+    plans.set(token, { id, fingerprint: fingerprint(record), payload, after, diff, sideEffects });
     return {
       status: "preview",
       constituent: identityOf(record),
       changes: diff,
+      ...(sideEffects.length ? { expected_side_effects: sideEffects } : {}),
       confirmation_token: token,
       ...(notes.length ? { notes } : {}),
       instruction: "Show these exact changes to the user and obtain approval before applying. A preview token is not approval. The token is valid only in this MCP server session.",
@@ -205,15 +224,29 @@ export function createNameUpdateService({
       catch { return { status: "verification_unavailable", id: plan.id, verified: false,
         message: "The update was sent, but a complete saved record could not be read. Do not repeat the write; inspect the constituent first." }; }
       const mismatched = NAME_FIELDS.filter(field => actual[field] !== plan.after[field]);
+      // A predicted copy passes only at exactly the predicted value. No change
+      // also passes, but is reported: LGL did not behave as predicted.
+      const predicted = new Map(plan.sideEffects.map(e => [e.field, e]));
+      const notObserved = [];
       const unexpected = [...new Set([...Object.keys(current), ...Object.keys(saved)])]
         .filter(field => !NAME_SET.has(field) && !DERIVED_FIELDS.has(field))
-        .filter(field => encode(current[field]) !== encode(saved[field]));
+        .filter(field => encode(current[field]) !== encode(saved[field]))
+        .filter(field => !(predicted.has(field) && Object.hasOwn(saved, field) && saved[field] === predicted.get(field).after));
+      for (const [field, effect] of predicted) {
+        if (Object.hasOwn(saved, field) && encode(current[field]) === encode(saved[field])) {
+          notObserved.push({ field, expected: effect.after, saved: saved[field] });
+        }
+      }
       const verified = !mismatched.length && !unexpected.length;
       return {
         status: verified ? "updated" : "verification_failed",
         id: plan.id,
         verified,
         changes: plan.diff,
+        ...(plan.sideEffects.length ? { expected_side_effects: plan.sideEffects } : {}),
+        ...(notObserved.length ? { side_effects_not_observed: notObserved,
+          note: "LGL did not make the predicted change to a mirrored field." +
+            (verified ? " The requested change verified; check whether the mirrored field should be updated in LGL." : "") } : {}),
         ...(mismatched.length ? { mismatched_name_fields: mismatched } : {}),
         ...(unexpected.length ? { unexpected_changed_fields: unexpected } : {}),
         ...(!verified ? { message: "The write was sent, but verification did not pass. No retry or automatic rollback was attempted." } : {}),
