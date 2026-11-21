@@ -397,3 +397,27 @@ test("other fields still fail verification alongside a predicted copy, including
   assert.equal(gone.verified, false);
   assert.deepEqual(gone.unexpected_changed_fields, ["alt_addressee"]);
 });
+
+test("null, missing or non-string alt_addressee values predict nothing and fail closed if they change", async () => {
+  for (const extra of [{ addressee: "", alt_addressee: null }, { addressee: "", alt_addressee: "" , drop: "alt_addressee" },
+    { alt_addressee: 7 }, { addressee: null, alt_addressee: null }]) {
+    const { drop, ...fields } = extra;
+    const record = org(fields);
+    if (drop) delete record[drop];
+    const service = fixture(record, mirror);
+    const preview = await service.preview({ id: 42, changes: NEW_ADDRESSEE });
+    assert.equal(preview.expected_side_effects, undefined, JSON.stringify(extra));
+    const result = await apply(service, preview);
+    assert.equal(result.verified, false, JSON.stringify(extra));
+    assert.deepEqual(result.unexpected_changed_fields, ["alt_addressee"], JSON.stringify(extra));
+  }
+});
+
+test("a predicted copy that did not happen alongside a failed addressee does not claim the change verified", async () => {
+  const service = fixture(org(), record => ({ ...record, addressee: "Pat Example" }));
+  const result = await apply(service, await service.preview({ id: 42, changes: NEW_ADDRESSEE }));
+  assert.equal(result.verified, false);
+  assert.deepEqual(result.mismatched_name_fields, ["addressee"]);
+  assert.equal(result.side_effects_not_observed.length, 1);
+  assert.doesNotMatch(result.note, /verified/);
+});

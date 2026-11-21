@@ -162,9 +162,11 @@ export function createNameUpdateService({
     const sideEffects = Object.entries(changed)
       .filter(([field]) => Object.hasOwn(MIRRORED_FIELDS, field))
       .map(([field, value]) => ({ source: field, field: MIRRORED_FIELDS[field], value }))
-      .filter(({ field, source }) => Object.hasOwn(record, field) &&
-        (record[field] == null || typeof record[field] === "string") && (record[field] ?? "") === before[source])
-      .map(({ source, field, value }) => ({ field, before: record[field] ?? "", after: value,
+      // Only two saved strings that are exactly equal; null or missing values
+      // predict nothing, so any change to them fails verification.
+      .filter(({ field, source }) => typeof record[field] === "string" && typeof record[source] === "string" &&
+        record[field] === record[source])
+      .map(({ source, field, value }) => ({ field, before: record[field], after: value,
         reason: `LGL copies a new ${source} into ${field} when they matched before the update. It is not sent in the request.` }));
     if (diff.some(d => ["prefix", "first_name", "middle_name", "last_name", "suffix", "spouse_name"].includes(d.field)) &&
         !Object.hasOwn(changed, "addressee")) {
@@ -232,7 +234,7 @@ export function createNameUpdateService({
         .filter(field => !(predicted.has(field) && Object.hasOwn(saved, field) && saved[field] === predicted.get(field).after));
       for (const [field, effect] of predicted) {
         if (Object.hasOwn(saved, field) && encode(current[field]) === encode(saved[field])) {
-          notObserved.push({ field, expected: effect.after, saved: saved[field] ?? "" });
+          notObserved.push({ field, expected: effect.after, saved: saved[field] });
         }
       }
       const verified = !mismatched.length && !unexpected.length;
@@ -243,7 +245,8 @@ export function createNameUpdateService({
         changes: plan.diff,
         ...(plan.sideEffects.length ? { expected_side_effects: plan.sideEffects } : {}),
         ...(notObserved.length ? { side_effects_not_observed: notObserved,
-          note: "LGL did not make the predicted change to a mirrored field. The requested change verified; check whether the mirrored field should be updated in LGL." } : {}),
+          note: "LGL did not make the predicted change to a mirrored field." +
+            (verified ? " The requested change verified; check whether the mirrored field should be updated in LGL." : "") } : {}),
         ...(mismatched.length ? { mismatched_name_fields: mismatched } : {}),
         ...(unexpected.length ? { unexpected_changed_fields: unexpected } : {}),
         ...(!verified ? { message: "The write was sent, but verification did not pass. No retry or automatic rollback was attempted." } : {}),
