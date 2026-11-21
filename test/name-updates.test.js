@@ -421,3 +421,18 @@ test("a predicted copy that did not happen alongside a failed addressee does not
   assert.equal(result.side_effects_not_observed.length, 1);
   assert.doesNotMatch(result.note, /verified/);
 });
+
+test("a predicted copy saved as null, a non-string or missing fails verification", async () => {
+  for (const saved of [null, 7, undefined]) {
+    const service = fixture(org(), record => {
+      const next = { ...record, alt_addressee: saved };
+      if (saved === undefined) delete next.alt_addressee;
+      return next;
+    });
+    const preview = await service.preview({ id: 42, changes: NEW_ADDRESSEE });
+    assert.equal(preview.expected_side_effects.length, 1);
+    const result = await apply(service, preview);
+    assert.equal(result.verified, false, String(saved));
+    assert.deepEqual(result.unexpected_changed_fields, ["alt_addressee"], String(saved));
+  }
+});
