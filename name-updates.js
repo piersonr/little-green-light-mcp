@@ -167,7 +167,7 @@ export function createNameUpdateService({
       .filter(({ field, source }) => typeof record[field] === "string" && typeof record[source] === "string" &&
         record[field] === record[source])
       .map(({ source, field, value }) => ({ field, before: record[field], after: value,
-        reason: `LGL copies a new ${source} into ${field} when they matched before the update. It is not sent in the request.` }));
+        reason: `LGL has been observed copying a new ${source} into ${field} when they matched before the update, so this change is predicted. It is not sent in the request.` }));
     if (diff.some(d => ["prefix", "first_name", "middle_name", "last_name", "suffix", "spouse_name"].includes(d.field)) &&
         !Object.hasOwn(changed, "addressee")) {
       notes.push(`LGL does not recalculate addressee ("${before.addressee}") or salutation when names change. Include addressee in this update if it should change too; salutation cannot be edited with this tool.`);
