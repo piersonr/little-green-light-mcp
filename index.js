@@ -181,7 +181,9 @@ server.registerTool(
     description:
       "Read an existing constituent and preview exact name-field changes. " +
       "Returns a one-use confirmation token. Does not write. Show the preview " +
-      "to the user and obtain approval before applying it. Native steward " +
+      "to the user and obtain approval before applying it, including any " +
+      "expected_side_effects (fields LGL changes on its own, such as alt_addressee " +
+      "following a new addressee). Native steward " +
       "assignments are not supported by LGL's published API.",
     inputSchema: {
       id: z.union([z.string().regex(/^[1-9]\d*$/), z.number().int().positive()]),

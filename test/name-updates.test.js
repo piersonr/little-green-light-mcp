@@ -331,3 +331,69 @@ test("apply waits for rate-limit room before its stale check and writes under a 
   const readStart = service.readTimes.find(t => t >= started);
   assert.ok(notAfter >= started + WRITE_WINDOW_MS && notAfter <= readStart + WRITE_WINDOW_MS, `${notAfter} vs ${readStart}`);
 });
+
+// An organization whose alt_addressee and annual_report_name match its addressee,
+// as LGL sets them at creation.
+const org = (extra = {}) => ({ ...base(), is_org: true, org_name: "Example Foundation",
+  addressee: "Pat Example", alt_addressee: "Pat Example", annual_report_name: "Pat Example", ...extra });
+const mirror = record => ({ ...record, alt_addressee: record.addressee });
+const NEW_ADDRESSEE = { addressee: "Pat & Sam Example" };
+
+test("a matching alt_addressee is predicted to follow the addressee, and LGL's copy verifies", async () => {
+  const service = fixture(org(), mirror);
+  const preview = await service.preview({ id: 42, changes: NEW_ADDRESSEE });
+  assert.deepEqual(preview.changes, [{ field: "addressee", before: "Pat Example", after: "Pat & Sam Example" }]);
+  assert.equal(preview.expected_side_effects.length, 1);
+  assert.deepEqual({ ...preview.expected_side_effects[0], reason: undefined },
+    { field: "alt_addressee", before: "Pat Example", after: "Pat & Sam Example", reason: undefined });
+  const result = await apply(service, preview);
+  assert.equal(result.verified, true, JSON.stringify(result));
+  assert.equal(result.side_effects_not_observed, undefined);
+  // The request carries only what the user asked for.
+  assert.deepEqual(service.writes, [{ id: 42, payload: NEW_ADDRESSEE }]);
+});
+
+test("a different alt_addressee is not predicted to change, and apply verifies", async () => {
+  const service = fixture(org({ alt_addressee: "The Example Family" }), mirror);
+  const preview = await service.preview({ id: 42, changes: NEW_ADDRESSEE });
+  assert.equal(preview.expected_side_effects, undefined);
+  // This fake LGL copies unconditionally, so only a non-copying record verifies.
+  const plain = fixture(org({ alt_addressee: "The Example Family" }));
+  const ok = await apply(plain, await plain.preview({ id: 42, changes: NEW_ADDRESSEE }));
+  assert.equal(ok.verified, true, JSON.stringify(ok));
+});
+
+test("an unpredicted alt_addressee change fails verification", async () => {
+  const service = fixture(org({ alt_addressee: "The Example Family" }), mirror);
+  const result = await apply(service, await service.preview({ id: 42, changes: NEW_ADDRESSEE }));
+  assert.equal(result.verified, false);
+  assert.deepEqual(result.unexpected_changed_fields, ["alt_addressee"]);
+});
+
+test("an alt_addressee saved with a different value than predicted fails verification", async () => {
+  const service = fixture(org(), record => ({ ...record, alt_addressee: "Something Else" }));
+  const result = await apply(service, await service.preview({ id: 42, changes: NEW_ADDRESSEE }));
+  assert.equal(result.verified, false);
+  assert.deepEqual(result.unexpected_changed_fields, ["alt_addressee"]);
+});
+
+test("a predicted alt_addressee copy that does not happen still verifies but is reported", async () => {
+  const service = fixture(org());
+  const result = await apply(service, await service.preview({ id: 42, changes: NEW_ADDRESSEE }));
+  assert.equal(result.verified, true, JSON.stringify(result));
+  assert.deepEqual(result.side_effects_not_observed, [{ field: "alt_addressee", expected: "Pat & Sam Example", saved: "Pat Example" }]);
+  assert.match(result.note, /did not make the predicted change/);
+});
+
+test("other fields still fail verification alongside a predicted copy, including annual_report_name", async () => {
+  for (const extra of [{ annual_report_name: "Pat & Sam Example" }, { is_deceased: true }]) {
+    const service = fixture(org(), record => ({ ...mirror(record), ...extra }));
+    const result = await apply(service, await service.preview({ id: 42, changes: NEW_ADDRESSEE }));
+    assert.equal(result.verified, false);
+    assert.deepEqual(result.unexpected_changed_fields, Object.keys(extra));
+  }
+  const missing = fixture(org(), record => { const { alt_addressee, ...rest } = record; return rest; });
+  const gone = await apply(missing, await missing.preview({ id: 42, changes: NEW_ADDRESSEE }));
+  assert.equal(gone.verified, false);
+  assert.deepEqual(gone.unexpected_changed_fields, ["alt_addressee"]);
+});
